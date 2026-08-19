@@ -98,9 +98,11 @@ Liệt kê ID trong `roles` giúp ping được cả vai trò **không** bật "
 
 ### Quy tắc bắn noti
 
-- **Một chiều**: mỗi ngày trong khoảng chỉ bắn chuyến rẻ nhất, tránh spam 10 tin gần giống nhau
+- **Một chiều**: mỗi ngày chỉ bắn mức giá rẻ nhất, tránh spam 10 tin gần giống nhau. Nhưng **mọi chuyến cùng mức giá đó đều được báo riêng** — hai chuyến 490k khác giờ bay là hai lựa chọn thật, không cái nào bị bỏ
 - **Khứ hồi**: ngưỡng giá áp cho **tổng** chiều đi + chiều về, bắn một tin cho cặp rẻ nhất
-- Giá đổi thì bắn lại (giá nằm trong `fingerprint`); giá y hệt thì im lặng
+- Chống trùng theo `configId|ngày|giá|số hiệu chuyến`: giá đổi thì bắn lại, khác chuyến thì bắn lại, giá y hệt cùng chuyến thì im lặng
+- Bật **"Báo lại kể cả khi giá không đổi"** ở config thì bỏ qua chống trùng, lượt nào khớp cũng bắn
+- Nút **"Gửi thử"** bắn một tin mẫu vào webhook để kiểm tra URL và tag, không cần chờ có vé
 - Discord lỗi thì **không** ghi `Alert`, để lượt sau bắn lại
 
 ## Cấu trúc

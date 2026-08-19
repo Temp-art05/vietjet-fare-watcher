@@ -37,6 +37,7 @@ export const configSchema = z
       .min(5, "Quét dày hơn 5 phút/lần dễ bị Vietjet chặn")
       .max(1440, "Tối đa 1 ngày/lần")
       .default(20),
+    alwaysNotify: z.boolean().default(false),
     discordWebhookUrl: z
       .string()
       .url("Webhook phải là URL hợp lệ")

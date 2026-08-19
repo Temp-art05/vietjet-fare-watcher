@@ -28,6 +28,8 @@ model WatchConfig {
   /// "everyone" | "here" | ID vai trò | null (không tag)
   mention          String?
   pollMinutes      Int      @default(20) // quét lại sau bao nhiêu phút
+  /// true = báo lại kể cả khi giá y hệt lần trước
+  alwaysNotify     Boolean  @default(false)
 
   lastRunAt        DateTime?
   lastError        String?
@@ -43,7 +45,7 @@ model Alert {
   configId    String
   config      WatchConfig @relation(fields: [configId], references: [id], onDelete: Cascade)
 
-  fingerprint String   @unique
+  fingerprint String
 
   origin      String
   dest        String
@@ -56,6 +58,7 @@ model Alert {
   notifiedAt  DateTime @default(now())
 
   @@index([configId, notifiedAt])
+  @@index([fingerprint])
 }
 
 /// Cài đặt chung, chỉ có đúng một dòng (id = "singleton").

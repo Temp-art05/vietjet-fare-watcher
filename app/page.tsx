@@ -18,6 +18,7 @@ type Config = {
   discordWebhookUrl: string;
   mention: string | null;
   pollMinutes: number;
+  alwaysNotify: boolean;
   lastRunAt: string | null;
   lastError: string | null;
 };
@@ -55,6 +56,7 @@ type FormState = {
   discordWebhookUrl: string;
   mentionType: "none" | "everyone" | "here" | "role";
   mentionRoleId: string;
+  alwaysNotify: boolean;
 };
 
 const blank: FormState = {
@@ -73,6 +75,7 @@ const blank: FormState = {
   discordWebhookUrl: "",
   mentionType: "none",
   mentionRoleId: "",
+  alwaysNotify: false,
 };
 
 const vnd = (n: number) => `${n.toLocaleString("vi-VN")} ₫`;
@@ -219,6 +222,7 @@ export default function Home() {
           ? c.mention
           : "role",
       mentionRoleId: c.mention && !["everyone", "here"].includes(c.mention) ? c.mention : "",
+      alwaysNotify: c.alwaysNotify,
     });
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
@@ -250,6 +254,23 @@ export default function Home() {
     }
   }
 
+  async function testWebhook(c: Config) {
+    setBusy(`test-${c.id}`);
+    setError("");
+    try {
+      const r = await fetch(`/api/configs/${c.id}/test`, { method: "POST" }).then((x) => x.json());
+      setError(
+        r.error
+          ? `${c.name}: ${r.error}`
+          : `${c.name}: đã gửi tin nhắn thử vào Discord, kiểm tra kênh xem có tag đúng không.`,
+      );
+    } catch {
+      setError("Không gọi được server.");
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function toggle(c: Config) {
     await fetch(`/api/configs/${c.id}`, {
       method: "PATCH",
@@ -272,6 +293,13 @@ export default function Home() {
       const res = await fetch(`/api/configs/${c.id}/run`, { method: "POST" });
       const r = await res.json();
       if (r.error) setError(`${c.name}: ${r.error}`);
+      else if (r.matched > 0 && r.notified === 0)
+        setError(
+          `${c.name}: quét ${r.scanned} vé, ${r.matched} vé khớp ngưỡng nhưng đã báo trước đó rồi ` +
+            `và giá không đổi nên không bắn lại. Muốn thử webhook thì bấm "Gửi thử".`,
+        );
+      else if (r.matched === 0)
+        setError(`${c.name}: quét ${r.scanned} vé, không có vé nào vào ngưỡng giá.`);
       else setError(`${c.name}: quét ${r.scanned} vé, khớp ${r.matched}, bắn ${r.notified} noti.`);
     } finally {
       setBusy(null);
@@ -492,6 +520,14 @@ export default function Home() {
               />
               Bật poll
             </label>
+            <label className="ml-6 flex items-center gap-2 text-sm text-slate-600">
+              <input
+                type="checkbox"
+                checked={form.alwaysNotify}
+                onChange={(e) => set("alwaysNotify", e.target.checked)}
+              />
+              Báo lại kể cả khi giá không đổi
+            </label>
           </div>
 
           <div className="sm:col-span-3">
@@ -591,6 +627,7 @@ export default function Home() {
                       {c.returnFrom && ` · về ${c.returnFrom} → ${c.returnTo}`}
                     </p>
                     <p className="text-sm text-slate-500">
+                      {c.alwaysNotify && "Báo lại cả khi trùng giá · "}
                       {c.mention &&
                         `Tag ${c.mention === "everyone" || c.mention === "here" ? "@" + c.mention : "vai trò"} · `}
                       Ngưỡng {vnd(c.minPrice)} – {vnd(c.maxPrice)} · quét mỗi{" "}
@@ -611,6 +648,13 @@ export default function Home() {
                       className="rounded-md bg-slate-900 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50"
                     >
                       {busy === c.id ? "Đang quét…" : "Check now"}
+                    </button>
+                    <button
+                      onClick={() => testWebhook(c)}
+                      disabled={busy === `test-${c.id}`}
+                      className="rounded-md border border-slate-300 px-3 py-1.5 text-xs text-slate-600 disabled:opacity-50"
+                    >
+                      {busy === `test-${c.id}` ? "Đang gửi…" : "Gửi thử"}
                     </button>
                     <button
                       onClick={() => toggle(c)}

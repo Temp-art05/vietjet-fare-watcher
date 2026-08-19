@@ -11,12 +11,17 @@ export type RunResult = {
   error?: string;
 };
 
-/** Cheapest fare per departure date. */
-function cheapestPerDate(fares: Fare[]): Map<string, Fare> {
-  const best = new Map<string, Fare>();
+/**
+ * Cheapest fare per departure date, keeping every flight tied at that price —
+ * two flights at the same price are two real options worth knowing about, so
+ * neither gets dropped just for costing the same.
+ */
+function cheapestPerDate(fares: Fare[]): Map<string, Fare[]> {
+  const best = new Map<string, Fare[]>();
   for (const f of fares) {
     const cur = best.get(f.date);
-    if (!cur || f.price < cur.price) best.set(f.date, f);
+    if (!cur || f.price < cur[0].price) best.set(f.date, [f]);
+    else if (f.price === cur[0].price) cur.push(f);
   }
   return best;
 }
@@ -62,28 +67,32 @@ function buildCandidates(config: WatchConfig, out: Fare[], ret: Fare[]): Candida
     ];
   }
 
-  // One-way: alert the cheapest flight of each qualifying date, not every flight,
-  // so a matching day does not dump ten near-identical messages into Discord.
+  // One-way: alert the cheapest price of each qualifying date rather than every
+  // flight, so a matching day does not dump ten near-identical messages into
+  // Discord — but every flight sharing that cheapest price gets its own alert,
+  // since two flights at the same price are two genuinely different options.
   const candidates: Candidate[] = [];
-  for (const [date, fare] of cheapestPerDate(out)) {
-    if (!inRange(fare.price)) continue;
-    candidates.push({
-      fingerprint: `${config.id}|${date}|${fare.price}|${fare.flightNo ?? "-"}`,
-      fare,
-      payload: {
-        configName: config.name,
-        origin: config.origin,
-        dest: config.dest,
-        tripType: config.tripType,
-        departDate: date,
-        price: fare.price,
-        flightNo: fare.flightNo,
-        depTime: fare.depTime,
-        arrTime: fare.arrTime,
-        deeplink: bookingUrl(config.origin, config.dest, date),
-        mention: config.mention,
-      },
-    });
+  for (const [date, fares] of cheapestPerDate(out)) {
+    for (const fare of fares) {
+      if (!inRange(fare.price)) continue;
+      candidates.push({
+        fingerprint: `${config.id}|${date}|${fare.price}|${fare.flightNo ?? "-"}`,
+        fare,
+        payload: {
+          configName: config.name,
+          origin: config.origin,
+          dest: config.dest,
+          tripType: config.tripType,
+          departDate: date,
+          price: fare.price,
+          flightNo: fare.flightNo,
+          depTime: fare.depTime,
+          arrTime: fare.arrTime,
+          deeplink: bookingUrl(config.origin, config.dest, date),
+          mention: config.mention,
+        },
+      });
+    }
   }
   return candidates;
 }
@@ -113,15 +122,17 @@ export async function runConfig(config: WatchConfig): Promise<RunResult> {
     result.matched = candidates.length;
 
     // Skip anything already announced; the price is part of the fingerprint, so a
-    // changed price still notifies.
-    const known = new Set(
-      (
-        await prisma.alert.findMany({
-          where: { fingerprint: { in: candidates.map((c) => c.fingerprint) } },
-          select: { fingerprint: true },
-        })
-      ).map((a) => a.fingerprint),
-    );
+    // changed price still notifies. `alwaysNotify` opts out of that entirely.
+    const known = config.alwaysNotify
+      ? new Set<string>()
+      : new Set(
+          (
+            await prisma.alert.findMany({
+              where: { fingerprint: { in: candidates.map((c) => c.fingerprint) } },
+              select: { fingerprint: true },
+            })
+          ).map((a) => a.fingerprint),
+        );
 
     for (const c of candidates) {
       if (known.has(c.fingerprint)) continue;
