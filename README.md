@@ -52,7 +52,7 @@ Chỉ còn đúng một biến, vì mọi thứ khác chỉnh được trên web
 
 ## Chỉnh gì trên web
 
-**Từng config** — tên, một chiều/khứ hồi, điểm đi/đến (dropdown 152 sân bay lấy thẳng từ Vietjet, không gõ tay mã IATA), khoảng ngày đi/về, ngưỡng giá từ–đến, Discord webhook, bật/tắt, và **chu kỳ quét riêng** (5 phút → 1 ngày). Mỗi config chạy theo nhịp của chính nó, sửa xong có hiệu lực ở tick kế tiếp, không cần restart.
+**Từng config** — tên, một chiều/khứ hồi, điểm đi/đến (dropdown 152 sân bay lấy thẳng từ Vietjet, không gõ tay mã IATA), khoảng ngày đi/về, ngưỡng giá từ–đến, Discord webhook, **tag khi có vé**, bật/tắt, và **chu kỳ quét riêng** (5 phút → 1 ngày). Mỗi config chạy theo nhịp của chính nó, sửa xong có hiệu lực ở tick kế tiếp, không cần restart.
 
 **Start / Stop** — công tắc chung cho cả bộ poll. Mặc định là dừng, phải bấm Start.
 
@@ -78,6 +78,23 @@ Vietjet cá nhân hoá giá theo dấu vết người truy cập, nên mỗi lư
 - Hết mỗi chu kỳ, bộ poll đóng hẳn browser để chu kỳ sau chạy trên browser mới
 
 Còn một thứ tool không đổi được là **địa chỉ IP**. Nếu muốn triệt để thì cắm thêm proxy xoay IP vào `chromium.launch({ proxy })` trong `lib/vietjet.ts`.
+
+### Tag khi có vé
+
+Mỗi config chọn được tag `@everyone`, `@here`, một vai trò cụ thể, hoặc không tag ai.
+
+Lấy ID vai trò: Discord → **Cài đặt → Nâng cao → Chế độ nhà phát triển**, rồi `Cài đặt máy chủ → Vai trò` → chuột phải vai trò → **Sao chép ID**.
+
+Có một cái bẫy ở đây: mention chỉ ping thật khi nằm trong trường `content` (embed không bao giờ ping) **và** payload kèm `allowed_mentions` cho phép. Thiếu vế thứ hai thì tin nhắn vẫn hiện chữ xanh nhưng không ai nhận thông báo. Code gửi cả hai:
+
+| Chọn | `content` | `allowed_mentions` |
+|---|---|---|
+| Không tag | `""` | `{"parse":[]}` |
+| @everyone | `@everyone` | `{"parse":["everyone"]}` |
+| @here | `@here` | `{"parse":["everyone"]}` |
+| Vai trò | `<@&ID>` | `{"parse":[],"roles":["ID"]}` |
+
+Liệt kê ID trong `roles` giúp ping được cả vai trò **không** bật "cho phép nhắc đến". Config không tag thì `parse: []` chặn mọi ping, kể cả lỡ có ký tự `@` trong tên config.
 
 ### Quy tắc bắn noti
 

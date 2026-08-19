@@ -25,6 +25,8 @@ model WatchConfig {
   maxPrice         Int
 
   discordWebhookUrl String
+  /// "everyone" | "here" | ID vai trò | null (không tag)
+  mention          String?
   pollMinutes      Int      @default(20) // quét lại sau bao nhiêu phút
 
   lastRunAt        DateTime?

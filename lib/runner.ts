@@ -56,6 +56,7 @@ function buildCandidates(config: WatchConfig, out: Fare[], ret: Fare[]): Candida
           depTime: bestOut.depTime,
           arrTime: bestOut.arrTime,
           deeplink: bookingUrl(config.origin, config.dest, bestOut.date),
+          mention: config.mention,
         },
       },
     ];
@@ -80,6 +81,7 @@ function buildCandidates(config: WatchConfig, out: Fare[], ret: Fare[]): Candida
         depTime: fare.depTime,
         arrTime: fare.arrTime,
         deeplink: bookingUrl(config.origin, config.dest, date),
+        mention: config.mention,
       },
     });
   }

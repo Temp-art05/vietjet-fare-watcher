@@ -10,9 +10,31 @@ export type AlertPayload = {
   depTime?: string | null;
   arrTime?: string | null;
   deeplink: string;
+  /** "everyone" | "here" | ID vai trò | null */
+  mention?: string | null;
 };
 
 const vnd = (n: number) => `${n.toLocaleString("vi-VN")} ₫`;
+
+/**
+ * Discord only pings when the mention sits in `content` (embeds never ping) AND
+ * `allowed_mentions` permits it. Without the allowlist a role mention renders as
+ * blue text that notifies nobody, so both halves have to line up.
+ */
+function mentionParts(mention?: string | null) {
+  if (mention === "everyone") {
+    return { content: "@everyone", allowed_mentions: { parse: ["everyone"] } };
+  }
+  if (mention === "here") {
+    return { content: "@here", allowed_mentions: { parse: ["everyone"] } };
+  }
+  if (mention && /^\d{17,20}$/.test(mention)) {
+    // Listing the id here pings the role even when it is not "mentionable".
+    return { content: `<@&${mention}>`, allowed_mentions: { parse: [], roles: [mention] } };
+  }
+  // Default to muting everything, so a config with no tag can never ping by accident.
+  return { content: "", allowed_mentions: { parse: [] } };
+}
 
 function embed(a: AlertPayload) {
   const route =
@@ -30,8 +52,12 @@ function embed(a: AlertPayload) {
     fields.push({ name: "Chuyến", value: `${a.flightNo}${time}`, inline: true });
   }
 
+  const ping = mentionParts(a.mention);
+
   return {
     username: "Vietjet Fare Watcher",
+    content: ping.content,
+    allowed_mentions: ping.allowed_mentions,
     embeds: [
       {
         title: `✈️ ${route} — ${vnd(a.price)}`,

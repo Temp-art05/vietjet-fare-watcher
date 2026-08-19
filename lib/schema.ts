@@ -23,6 +23,14 @@ export const configSchema = z
     returnTo: isoDate.nullish(),
     minPrice: z.number().int().min(0).default(0),
     maxPrice: z.number().int().positive("Giá trần phải lớn hơn 0"),
+    mention: z
+      .string()
+      .trim()
+      .nullish()
+      .transform((v) => (v ? v : null))
+      .refine((v) => v === null || v === "everyone" || v === "here" || /^\d{17,20}$/.test(v), {
+        message: "Tag phải là everyone, here, hoặc ID vai trò (17–20 chữ số)",
+      }),
     pollMinutes: z
       .number()
       .int()

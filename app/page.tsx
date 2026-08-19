@@ -16,6 +16,7 @@ type Config = {
   minPrice: number;
   maxPrice: number;
   discordWebhookUrl: string;
+  mention: string | null;
   pollMinutes: number;
   lastRunAt: string | null;
   lastError: string | null;
@@ -52,6 +53,8 @@ type FormState = {
   maxPrice: number;
   pollMinutes: number;
   discordWebhookUrl: string;
+  mentionType: "none" | "everyone" | "here" | "role";
+  mentionRoleId: string;
 };
 
 const blank: FormState = {
@@ -68,6 +71,8 @@ const blank: FormState = {
   maxPrice: 1_000_000,
   pollMinutes: 20,
   discordWebhookUrl: "",
+  mentionType: "none",
+  mentionRoleId: "",
 };
 
 const vnd = (n: number) => `${n.toLocaleString("vi-VN")} ₫`;
@@ -163,6 +168,12 @@ export default function Home() {
       minPrice: Number(form.minPrice),
       maxPrice: Number(form.maxPrice),
       pollMinutes: Number(form.pollMinutes),
+      mention:
+        form.mentionType === "none"
+          ? null
+          : form.mentionType === "role"
+            ? form.mentionRoleId.trim()
+            : form.mentionType,
       returnFrom: form.tripType === "roundtrip" ? form.returnFrom || null : null,
       returnTo: form.tripType === "roundtrip" ? form.returnTo || null : null,
     };
@@ -202,6 +213,12 @@ export default function Home() {
       maxPrice: c.maxPrice,
       pollMinutes: c.pollMinutes,
       discordWebhookUrl: c.discordWebhookUrl,
+      mentionType: !c.mention
+        ? "none"
+        : c.mention === "everyone" || c.mention === "here"
+          ? c.mention
+          : "role",
+      mentionRoleId: c.mention && !["everyone", "here"].includes(c.mention) ? c.mention : "",
     });
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
@@ -488,6 +505,36 @@ export default function Home() {
             />
           </div>
 
+          <div>
+            <label className={label}>Tag khi có vé</label>
+            <select
+              className={field}
+              value={form.mentionType}
+              onChange={(e) => set("mentionType", e.target.value as FormState["mentionType"])}
+            >
+              <option value="none">Không tag ai</option>
+              <option value="everyone">@everyone</option>
+              <option value="here">@here (ai đang online)</option>
+              <option value="role">Vai trò cụ thể</option>
+            </select>
+          </div>
+
+          {form.mentionType === "role" && (
+            <div className="sm:col-span-2">
+              <label className={label}>
+                ID vai trò — bật Cài đặt → Nâng cao → Chế độ nhà phát triển, rồi chuột phải vai
+                trò → Sao chép ID
+              </label>
+              <input
+                className={field}
+                value={form.mentionRoleId}
+                onChange={(e) => set("mentionRoleId", e.target.value.replace(/\D/g, ""))}
+                placeholder="1234567890123456789"
+                required
+              />
+            </div>
+          )}
+
           <div className="flex gap-3 sm:col-span-3">
             <button
               type="submit"
@@ -544,6 +591,8 @@ export default function Home() {
                       {c.returnFrom && ` · về ${c.returnFrom} → ${c.returnTo}`}
                     </p>
                     <p className="text-sm text-slate-500">
+                      {c.mention &&
+                        `Tag ${c.mention === "everyone" || c.mention === "here" ? "@" + c.mention : "vai trò"} · `}
                       Ngưỡng {vnd(c.minPrice)} – {vnd(c.maxPrice)} · quét mỗi{" "}
                       {c.pollMinutes >= 60
                         ? `${c.pollMinutes / 60} tiếng`
