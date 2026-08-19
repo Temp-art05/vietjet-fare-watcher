@@ -142,18 +142,31 @@ export default function Home() {
   const [airports, setAirports] = useState<Airport[]>([]);
 
   const load = useCallback(async () => {
-    const [c, a, s, ap] = await Promise.all([
-      fetch("/api/configs").then((r) => r.json()),
-      fetch("/api/alerts").then((r) => r.json()),
-      fetch("/api/settings").then((r) => r.json()),
-      fetch("/api/airports")
-        .then((r) => (r.ok ? r.json() : []))
-        .catch(() => []),
-    ]);
-    setConfigs(c);
-    setAlerts(a);
-    setSettings(s);
-    if (Array.isArray(ap)) setAirports(ap);
+    // API lỗi thì trả { error }, không phải mảng. Nhét thẳng vào state là lát
+    // nữa .map() nổ và cả trang trắng — nên lỗi phải thành thông báo đọc được.
+    const json = async (url: string) => {
+      const res = await fetch(url);
+      const body = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(body?.error ?? `${url} lỗi (HTTP ${res.status})`);
+      return body;
+    };
+
+    try {
+      const [c, a, s, ap] = await Promise.all([
+        json("/api/configs"),
+        json("/api/alerts"),
+        json("/api/settings"),
+        fetch("/api/airports")
+          .then((r) => (r.ok ? r.json() : []))
+          .catch(() => []),
+      ]);
+      setConfigs(Array.isArray(c) ? c : []);
+      setAlerts(Array.isArray(a) ? a : []);
+      setSettings(s);
+      if (Array.isArray(ap)) setAirports(ap);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Không tải được dữ liệu");
+    }
   }, []);
 
   useEffect(() => {

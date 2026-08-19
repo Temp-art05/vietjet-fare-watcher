@@ -82,6 +82,7 @@ export function newId() {
 /* ------------------------------------------------------------------ drivers */
 
 type Driver = {
+  kind: "file" | "blob" | "unconfigured";
   name: string;
   load(): Promise<string | null>;
   save(text: string): Promise<void>;
@@ -92,6 +93,7 @@ function fileDriver(): Driver {
   const file = path.resolve(process.env.DATA_FILE ?? "data/db.json");
 
   return {
+    kind: "file",
     name: `file:${file}`,
     async load() {
       try {
@@ -121,6 +123,7 @@ function blobDriver(): Driver {
   const token = process.env.BLOB_READ_WRITE_TOKEN;
 
   return {
+    kind: "blob",
     name: `blob:${pathname}`,
     async load() {
       const { get } = await import("@vercel/blob");
@@ -149,27 +152,50 @@ const isServerless = () => Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_
 
 /**
  * Serverless mà không có blob store thì không có chỗ nào ghi được: ổ đĩa chỉ
- * đọc. Thà báo thẳng còn hơn để `fs.mkdir` ném EROFS — lỗi đó không nói cho ai
+ * đọc. Thà báo thẳng còn hơn để `fs.mkdir` ném ENOENT — lỗi đó không nói cho ai
  * biết phải làm gì.
+ *
+ * Chỉ chặn lúc GHI. Đọc vẫn trả "chưa có gì" để web còn mở lên được mà hiện
+ * thông báo — chặn cả đọc thì cả trang trắng, người dùng không biết vì sao.
  */
 function unconfiguredDriver(): Driver {
-  const fail = (): never => {
-    throw new Error(
-      "Chưa cấu hình chỗ lưu dữ liệu: đang chạy trên Vercel nhưng thiếu " +
-        "BLOB_READ_WRITE_TOKEN, mà ổ đĩa serverless thì chỉ đọc. Vào Vercel → " +
-        "Storage → Blob → tạo store rồi Redeploy lại project.",
-    );
+  return {
+    kind: "unconfigured",
+    name: "chưa cấu hình",
+    async load() {
+      return null;
+    },
+    async save() {
+      throw new Error(
+        "Chưa cấu hình chỗ lưu dữ liệu: đang chạy trên Vercel nhưng thiếu " +
+          "BLOB_READ_WRITE_TOKEN, mà ổ đĩa serverless thì chỉ đọc. Vào Vercel → " +
+          "Storage → Blob → tạo store rồi Redeploy lại project.",
+      );
+    },
   };
-  return { name: "chưa cấu hình", load: fail, save: fail };
 }
 
-const driver: Driver = process.env.BLOB_READ_WRITE_TOKEN
-  ? blobDriver()
-  : isServerless()
-    ? unconfiguredDriver()
-    : fileDriver();
+/**
+ * Chọn driver ở mỗi lượt gọi chứ không phải một lần lúc nạp module: bundler có
+ * thể thay `process.env.X` bằng giá trị lúc build, mà lúc build thì blob store
+ * có khi chưa được gắn. Đọc lúc chạy thì cấu hình mới có hiệu lực ngay.
+ */
+function pickDriver(): Driver {
+  if (process.env.BLOB_READ_WRITE_TOKEN) return blobDriver();
+  if (isServerless()) return unconfiguredDriver();
+  return fileDriver();
+}
 
-export const storeName = driver.name;
+/** Thông tin chẩn đoán an toàn để phơi ra ngoài — không kèm token, không kèm BLOB_PATH. */
+export function storeStatus() {
+  return {
+    driver: pickDriver().kind,
+    serverless: isServerless(),
+    hasBlobToken: Boolean(process.env.BLOB_READ_WRITE_TOKEN),
+    blobPathSet: Boolean(process.env.BLOB_PATH),
+    dataFileSet: Boolean(process.env.DATA_FILE),
+  };
+}
 
 /* --------------------------------------------------------------- read/write */
 
@@ -187,6 +213,7 @@ function normalise(raw: unknown): Data {
 }
 
 export async function readData(): Promise<Data> {
+  const driver = pickDriver();
   const text = await driver.load();
   if (text === null) return emptyData();
   try {
@@ -202,7 +229,7 @@ async function writeData(data: Data): Promise<void> {
       .sort((a, b) => b.notifiedAt.localeCompare(a.notifiedAt))
       .slice(0, MAX_ALERTS);
   }
-  await driver.save(`${JSON.stringify(data, null, 2)}\n`);
+  await pickDriver().save(`${JSON.stringify(data, null, 2)}\n`);
 }
 
 // Không có transaction như database, nên các lượt ghi trong cùng process phải
