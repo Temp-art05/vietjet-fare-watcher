@@ -58,7 +58,11 @@ Web ở `http://<host>:3000`. File JSON nằm trên volume `watcher-data` nên c
 
 Chạy được cả bộ, kể cả phần scrape. Ba thứ đã được chuẩn bị sẵn trong repo:
 
-**1. Lưu dữ liệu.** Tạo Blob store (Storage → Blob), Vercel tự thêm `BLOB_READ_WRITE_TOKEN`. Đặt thêm `BLOB_PATH` là một chuỗi ngẫu nhiên khó đoán — blob là public, ai biết URL là đọc được cả webhook Discord trong file.
+**1. Lưu dữ liệu — bắt buộc.** Tạo Blob store (Storage → Blob → Create), Vercel tự thêm `BLOB_READ_WRITE_TOKEN`. **Phải Redeploy sau khi tạo**: biến môi trường chỉ có hiệu lực với deployment mới, bản đang chạy không tự nhận.
+
+Thiếu bước này thì app rơi về ghi file trên ổ đĩa, mà ổ đĩa serverless chỉ đọc — mọi thao tác lưu sẽ trả 500 kèm thông báo nhắc đúng việc phải làm.
+
+Đặt thêm `BLOB_PATH` là một chuỗi ngẫu nhiên khó đoán — blob là public, ai biết URL là đọc được cả webhook Discord trong file.
 
 **2. Chromium.** Ổ đĩa serverless không có browser, nên `lib/vietjet.ts` tự đổi cách khởi động khi thấy biến `VERCEL`: giải nén Chromium từ `@sparticuz/chromium` thay vì dùng bản `playwright install` tải về.
 

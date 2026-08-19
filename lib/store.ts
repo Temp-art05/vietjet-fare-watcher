@@ -123,13 +123,14 @@ function blobDriver(): Driver {
   return {
     name: `blob:${pathname}`,
     async load() {
-      const { head } = await import("@vercel/blob");
-      const meta = await head(pathname, { token }).catch(() => null);
-      if (!meta) return null;
-      // Blob URL được CDN cache; `no-store` để không đọc phải bản cũ vừa ghi đè.
-      const res = await fetch(meta.url, { cache: "no-store" });
-      if (!res.ok) throw new Error(`Không đọc được blob: HTTP ${res.status}`);
-      return res.text();
+      const { get } = await import("@vercel/blob");
+      // `useCache: false` vì blob nằm sau CDN: vừa ghi xong mà đọc bản cache thì
+      // lượt sửa kế tiếp sẽ dựng trên dữ liệu cũ và xoá mất thay đổi vừa rồi.
+      const res = await get(pathname, { access: "public", useCache: false, token });
+      // `get` trả null đúng khi chưa có file. Mọi lỗi khác (token sai, store bị
+      // xoá…) phải ném lên — nuốt nó thành "chưa có gì" là ghi đè sạch dữ liệu.
+      if (!res?.stream) return null;
+      return new Response(res.stream).text();
     },
     async save(text) {
       const { put } = await import("@vercel/blob");
@@ -139,13 +140,34 @@ function blobDriver(): Driver {
         contentType: "application/json",
         addRandomSuffix: false,
         allowOverwrite: true,
-        cacheControlMaxAge: 0,
       });
     },
   };
 }
 
-const driver: Driver = process.env.BLOB_READ_WRITE_TOKEN ? blobDriver() : fileDriver();
+const isServerless = () => Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
+
+/**
+ * Serverless mà không có blob store thì không có chỗ nào ghi được: ổ đĩa chỉ
+ * đọc. Thà báo thẳng còn hơn để `fs.mkdir` ném EROFS — lỗi đó không nói cho ai
+ * biết phải làm gì.
+ */
+function unconfiguredDriver(): Driver {
+  const fail = (): never => {
+    throw new Error(
+      "Chưa cấu hình chỗ lưu dữ liệu: đang chạy trên Vercel nhưng thiếu " +
+        "BLOB_READ_WRITE_TOKEN, mà ổ đĩa serverless thì chỉ đọc. Vào Vercel → " +
+        "Storage → Blob → tạo store rồi Redeploy lại project.",
+    );
+  };
+  return { name: "chưa cấu hình", load: fail, save: fail };
+}
+
+const driver: Driver = process.env.BLOB_READ_WRITE_TOKEN
+  ? blobDriver()
+  : isServerless()
+    ? unconfiguredDriver()
+    : fileDriver();
 
 export const storeName = driver.name;
 
