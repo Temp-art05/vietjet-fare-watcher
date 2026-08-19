@@ -1,0 +1,13 @@
+services:
+  watcher:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: file:/app/data/dev.db
+    volumes:
+      - watcher-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  watcher-data:
