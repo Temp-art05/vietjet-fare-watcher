@@ -1,13 +1,8 @@
 import { NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { listAlerts } from "@/lib/db";
 
 export const runtime = "nodejs";
 
 export async function GET() {
-  const alerts = await prisma.alert.findMany({
-    orderBy: { notifiedAt: "desc" },
-    take: 50,
-    include: { config: { select: { name: true } } },
-  });
-  return NextResponse.json(alerts);
+  return NextResponse.json(await listAlerts(50));
 }

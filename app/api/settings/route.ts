@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { getSettings, updateSettings } from "@/lib/settings";
+import { getSettings, updateSettings } from "@/lib/db";
 
 export const runtime = "nodejs";
 

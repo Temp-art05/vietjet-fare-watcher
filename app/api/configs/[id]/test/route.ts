@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { getConfig } from "@/lib/db";
 import { sendDiscord } from "@/lib/discord";
 
 export const runtime = "nodejs";
@@ -11,7 +11,7 @@ export const runtime = "nodejs";
  */
 export async function POST(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const config = await prisma.watchConfig.findUnique({ where: { id } });
+  const config = await getConfig(id);
   if (!config) return NextResponse.json({ error: "Không tìm thấy config" }, { status: 404 });
 
   const ok = await sendDiscord(config.discordWebhookUrl, {

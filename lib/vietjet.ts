@@ -1,4 +1,4 @@
-import { chromium, type Browser, type Page } from "playwright";
+import { chromium, type Browser, type LaunchOptions, type Page } from "playwright-core";
 
 export type Fare = {
   date: string; // YYYY-MM-DD
@@ -221,12 +221,42 @@ async function readFlights(page: Page, date: string): Promise<Fare[]> {
 
 let shared: Browser | null = null;
 
+// Cờ duy nhất mình thật sự cần: giấu dấu hiệu "trình duyệt đang bị điều khiển".
+const STEALTH_ARG = "--disable-blink-features=AutomationControlled";
+
+/**
+ * Playwright không chạy được với vài cờ mà @sparticuz/chromium khuyến nghị cho
+ * Puppeteer: `--single-process` phá `browser.newContext()` (mỗi lượt search đều
+ * mở một context mới), còn `--headless='shell'` chồng lên chế độ headless mà
+ * Playwright tự đặt.
+ */
+const INCOMPATIBLE = ["--single-process", "--headless"];
+
+const isServerless = () => Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
+
+async function launchOptions(): Promise<LaunchOptions> {
+  if (!isServerless()) {
+    // Local/Docker: dùng Chromium do `npx playwright install chromium` tải về.
+    return { headless: true, args: [STEALTH_ARG, "--no-sandbox"] };
+  }
+
+  // Serverless: ổ đĩa không có sẵn Chromium, phải giải nén bản đóng gói kèm.
+  const { default: chromiumPack } = await import("@sparticuz/chromium");
+
+  // Giữ nguyên graphics stack (mặc định bật): tắt đi thì nhanh hơn nhưng mất
+  // WebGL, mà reCAPTCHA v3 của Vietjet soi đúng những thứ như thế.
+  const args = chromiumPack.args.filter((a) => !INCOMPATIBLE.some((bad) => a.startsWith(bad)));
+
+  return {
+    headless: true,
+    executablePath: await chromiumPack.executablePath(),
+    args: [...args, STEALTH_ARG],
+  };
+}
+
 async function getBrowser() {
   if (shared?.isConnected()) return shared;
-  shared = await chromium.launch({
-    headless: true,
-    args: ["--disable-blink-features=AutomationControlled", "--no-sandbox"],
-  });
+  shared = await chromium.launch(await launchOptions());
   return shared;
 }
 

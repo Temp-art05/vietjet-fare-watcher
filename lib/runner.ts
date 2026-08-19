@@ -1,5 +1,5 @@
-import type { WatchConfig } from "@prisma/client";
-import { prisma } from "./prisma";
+import { createAlert, knownFingerprints, listEnabledConfigs, markConfigRun } from "./db";
+import type { WatchConfig } from "./store";
 import { sendDiscord, type AlertPayload } from "./discord";
 import { bookingUrl, searchLeg, type Fare } from "./vietjet";
 
@@ -125,14 +125,7 @@ export async function runConfig(config: WatchConfig): Promise<RunResult> {
     // changed price still notifies. `alwaysNotify` opts out of that entirely.
     const known = config.alwaysNotify
       ? new Set<string>()
-      : new Set(
-          (
-            await prisma.alert.findMany({
-              where: { fingerprint: { in: candidates.map((c) => c.fingerprint) } },
-              select: { fingerprint: true },
-            })
-          ).map((a) => a.fingerprint),
-        );
+      : await knownFingerprints(candidates.map((c) => c.fingerprint));
 
     for (const c of candidates) {
       if (known.has(c.fingerprint)) continue;
@@ -141,40 +134,43 @@ export async function runConfig(config: WatchConfig): Promise<RunResult> {
       // Only record what actually reached Discord, so a failed send retries next run.
       if (!ok) continue;
 
-      await prisma.alert.create({
-        data: {
-          configId: config.id,
-          fingerprint: c.fingerprint,
-          origin: config.origin,
-          dest: config.dest,
-          departDate: c.payload.departDate,
-          returnDate: c.payload.returnDate ?? null,
-          price: c.payload.price,
-          flightNo: c.payload.flightNo ?? null,
-          deeplink: c.payload.deeplink,
-        },
+      await createAlert({
+        configId: config.id,
+        fingerprint: c.fingerprint,
+        origin: config.origin,
+        dest: config.dest,
+        departDate: c.payload.departDate,
+        returnDate: c.payload.returnDate ?? null,
+        price: c.payload.price,
+        flightNo: c.payload.flightNo ?? null,
+        deeplink: c.payload.deeplink,
       });
       result.notified++;
     }
 
-    await prisma.watchConfig.update({
-      where: { id: config.id },
-      data: { lastRunAt: new Date(), lastError: null },
-    });
+    await markConfigRun(config.id, null);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     result.error = message;
-    await prisma.watchConfig
-      .update({ where: { id: config.id }, data: { lastRunAt: new Date(), lastError: message } })
-      .catch(() => {});
+    await markConfigRun(config.id, message).catch(() => {});
   }
 
   return result;
 }
 
-async function runSequentially(configs: WatchConfig[]): Promise<RunResult[]> {
+/**
+ * `deadline` là mốc thời gian (epoch ms) phải dừng trước. Serverless cắt ngang
+ * function khi hết giờ, mà bị cắt giữa lúc quét thì config đó không kịp ghi
+ * `lastRunAt` — nên thà không bắt đầu config kế tiếp còn hơn bị chém nửa chừng.
+ * Config chưa chạy vẫn còn "tới hạn", lượt sau tự nhặt tiếp.
+ */
+async function runSequentially(configs: WatchConfig[], deadline?: number): Promise<RunResult[]> {
   const results: RunResult[] = [];
-  for (const config of configs) {
+  for (const [i, config] of configs.entries()) {
+    if (deadline && Date.now() >= deadline) {
+      console.log(`[runner] hết giờ, hoãn ${configs.length - i} config sang lượt sau`);
+      break;
+    }
     console.log(`[runner] ${config.name} (${config.origin}→${config.dest})`);
     const r = await runConfig(config);
     console.log(
@@ -188,8 +184,8 @@ async function runSequentially(configs: WatchConfig[]): Promise<RunResult[]> {
 }
 
 /** Runs every enabled config, one at a time to keep only one browser tab busy. */
-export async function runAllEnabled(): Promise<RunResult[]> {
-  return runSequentially(await prisma.watchConfig.findMany({ where: { enabled: true } }));
+export async function runAllEnabled(deadline?: number): Promise<RunResult[]> {
+  return runSequentially(await listEnabledConfigs(), deadline);
 }
 
 /**
@@ -197,13 +193,13 @@ export async function runAllEnabled(): Promise<RunResult[]> {
  * written even when a run fails, so a broken config waits its full interval
  * instead of retrying on every tick.
  */
-export async function runDueConfigs(): Promise<RunResult[]> {
-  const configs = await prisma.watchConfig.findMany({ where: { enabled: true } });
+export async function runDueConfigs(deadline?: number): Promise<RunResult[]> {
+  const configs = await listEnabledConfigs();
   const now = Date.now();
   const due = configs.filter(
-    (c) => !c.lastRunAt || now - c.lastRunAt.getTime() >= c.pollMinutes * 60_000,
+    (c) => !c.lastRunAt || now - Date.parse(c.lastRunAt) >= c.pollMinutes * 60_000,
   );
   if (!due.length) return [];
   console.log(`[runner] ${due.length}/${configs.length} config tới hạn quét`);
-  return runSequentially(due);
+  return runSequentially(due, deadline);
 }

@@ -1,5 +1,5 @@
 import { runDueConfigs } from "./lib/runner";
-import { getSettings } from "./lib/settings";
+import { getSettings } from "./lib/db";
 import { closeBrowser } from "./lib/vietjet";
 
 // Everything a user would change lives in the database and is editable on the

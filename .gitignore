@@ -8,10 +8,10 @@ build/
 *.tsbuildinfo
 next-env.d.ts
 
-# database — SQLite file is per-deployment, never committed
+# dữ liệu — file JSON là của từng bản deploy, không commit
+/data/
 *.db
 *.db-journal
-/data/
 
 # env
 .env

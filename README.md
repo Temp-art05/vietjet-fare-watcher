@@ -5,6 +5,7 @@ Tool tự quét giá vé Vietjet theo chu kỳ. Vé nào rơi vào ngưỡng gi�
 - **FE + BE** trong một app Next.js
 - **Config toàn bộ trên web**: webhook, ngưỡng giá từ–đến, một chiều / khứ hồi, khoảng ngày đi/về, chu kỳ quét
 - **Nhiều config**, mỗi cái một mục đích và một nhịp quét riêng
+- **Không cần database**: toàn bộ dữ liệu nằm trong một file JSON
 
 ## Lưu ý
 
@@ -15,22 +16,35 @@ Tool này điều khiển website công khai của Vietjet để tự theo dõi 
 ```bash
 npm install
 npx playwright install chromium     # lần đầu, tải Chromium
-cp .env.example .env                # cấu hình đường dẫn SQLite
-npm run db:push                     # tạo prisma/dev.db
 npm run dev                         # xong — http://localhost:3000
 ```
 
-Một lệnh là đủ: bộ poll chạy luôn bên trong app (`instrumentation.ts`), không phải mở thêm process nào.
+Một lệnh là đủ: bộ poll chạy luôn bên trong app (`instrumentation.ts`), không phải mở thêm process nào. **Không cần biến môi trường nào** — dữ liệu tự ghi vào `data/db.json`, muốn đổi chỗ thì đặt `DATA_FILE`.
 
 Trên web:
 
 1. **Thêm config** — dán Discord webhook URL (Server Settings → Integrations → Webhooks → Copy Webhook URL), đặt ngưỡng giá và chu kỳ quét
 2. Bấm **Start** — từ đó mỗi config tự quét theo chu kỳ của nó
-3. Bấm **Stop** khi muốn ngừng; trạng thái lưu trong DB nên khởi động lại app vẫn giữ nguyên
+3. Bấm **Stop** khi muốn ngừng; trạng thái lưu trong file JSON nên khởi động lại app vẫn giữ nguyên
 
 Muốn thử ngay không chờ hết chu kỳ thì bấm **Check now** ở config, hoặc **Quét ngay 1 lượt** để chạy hết mọi config đang bật.
 
+## Lưu dữ liệu
+
+Không có database. Config, lịch sử noti và công tắc Start/Stop nằm chung trong **một document JSON** — đọc/ghi nguyên file, vì dữ liệu chỉ cỡ vài chục config và vài nghìn dòng lịch sử. Mọi lượt ghi đi qua `mutate()` trong `lib/store.ts`, xếp hàng lần lượt nên hai request cùng lúc không đè lên nhau, và ghi ra file tạm rồi `rename` nên mất điện giữa chừng cũng không để lại file JSON hỏng.
+
+File này ở đâu thì tuỳ biến môi trường:
+
+| Có `BLOB_READ_WRITE_TOKEN`? | Nơi cất | Dùng khi |
+|---|---|---|
+| Không | File trên ổ đĩa, đường dẫn `DATA_FILE` | Local, Docker, VPS |
+| Có | Vercel Blob, đường dẫn `BLOB_PATH` | Vercel (ổ đĩa chỉ đọc) |
+
+Lịch sử alert bị cắt còn 2000 dòng mới nhất mỗi lần ghi, để file không phình vô hạn. Muốn sao lưu hay chuyển máy thì copy đúng file JSON đó.
+
 ## Deploy
+
+### Docker / Railway / Fly.io / VPS — cách khuyến nghị
 
 Một container, một process:
 
@@ -38,17 +52,55 @@ Một container, một process:
 docker compose up -d --build
 ```
 
-Web ở `http://<host>:3000`. SQLite nằm trên volume `watcher-data` nên config và lịch sử noti không mất khi rebuild.
+Web ở `http://<host>:3000`. File JSON nằm trên volume `watcher-data` nên config và lịch sử noti không mất khi rebuild.
 
-Deploy lên Railway / Fly.io / VPS đều dùng chung `Dockerfile` này. **Không deploy được lên Vercel** vì Playwright cần Chromium thật và SQLite cần ổ đĩa ghi được.
+### Vercel
+
+Chạy được cả bộ, kể cả phần scrape. Ba thứ đã được chuẩn bị sẵn trong repo:
+
+**1. Lưu dữ liệu.** Tạo Blob store (Storage → Blob), Vercel tự thêm `BLOB_READ_WRITE_TOKEN`. Đặt thêm `BLOB_PATH` là một chuỗi ngẫu nhiên khó đoán — blob là public, ai biết URL là đọc được cả webhook Discord trong file.
+
+**2. Chromium.** Ổ đĩa serverless không có browser, nên `lib/vietjet.ts` tự đổi cách khởi động khi thấy biến `VERCEL`: giải nén Chromium từ `@sparticuz/chromium` thay vì dùng bản `playwright install` tải về.
+
+- `playwright-core` (không kèm browser) nằm ở `dependencies`; `playwright` đầy đủ chỉ là `devDependency` để chạy local
+- Hai package **phải khớp phiên bản Chromium**: `playwright-core@1.61` và `@sparticuz/chromium@149` cùng dùng Chromium 149. Nâng cái này thì nâng cả cái kia
+- Vài cờ mà `@sparticuz/chromium` khuyến nghị lại phá Playwright — `--single-process` làm hỏng `browser.newContext()`, `--headless='shell'` chồng lên chế độ headless Playwright tự đặt — nên chúng bị lọc ra trong `launchOptions()`
+- Binary Chromium là mấy file `.br` chỉ mở lúc chạy, bộ dò phụ thuộc của Next không thấy, nên `outputFileTracingIncludes` trong `next.config.mjs` khai tay cho từng route có quét. Bundle ra khoảng **75 MB**, thoải mái dưới hạn 250 MB
+
+**3. Lịch quét.** `worker.ts` không sống trên serverless (process đóng ngay sau mỗi request), nên `instrumentation.ts` tự bỏ qua khi thấy biến `VERCEL`. Thay vào đó `vercel.json` khai Cron gọi `/api/cron`, làm đúng việc bộ poll vẫn làm. Đặt `CRON_SECRET` trong Project Settings để chặn request lạ.
+
+Lịch mặc định để **`0 3 * * *`** (3h sáng mỗi ngày) vì đó là mức dày nhất mà **Hobby** cho phép — để dày hơn thì Vercel **từ chối deploy** luôn. Một ngày một lượt thì tool gần như vô dụng, nên chọn một trong hai cách:
+
+- **Lên Pro** rồi sửa `vercel.json` thành `*/5 * * * *` (Pro cho tới 1 lần/phút)
+- **Vẫn ở Hobby**: dùng một dịch vụ cron miễn phí bên ngoài ([cron-job.org](https://cron-job.org), GitHub Actions…) gọi `GET https://<app>.vercel.app/api/cron` mỗi 5 phút, kèm header `Authorization: Bearer <CRON_SECRET>`. Route không quan tâm ai gọi, miễn đúng secret — nên cách này cho nhịp quét y hệt Pro mà không tốn tiền
+
+Vì function bị cắt cứng khi hết giờ, các route có quét đều **tự canh giờ**: chúng nhận một deadline (`maxDuration` trừ 30s dự phòng) và không bắt đầu config mới khi sắp hết. Config chưa kịp chạy vẫn còn "tới hạn" nên lượt cron sau tự nhặt tiếp — quét không bao giờ bị chém nửa chừng, chỉ bị chia thành nhiều lượt.
+
+Giới hạn thực tế phải sống chung:
+
+| | Hobby | Pro |
+|---|---|---|
+| Cron dày nhất | **1 lần/ngày** | 1 lần/phút |
+| `maxDuration` | 300s | 300s mặc định, tối đa 800s |
+| RAM | 2 GB | 2–4 GB |
+
+Repo để `maxDuration = 300` vì nó hợp lệ ở cả hai. Trên Pro thì sửa số đó trong ba route `app/api/cron`, `app/api/run-all`, `app/api/configs/[id]/run` lên tới 800 — Next bắt viết số thẳng nên không gom vào một chỗ được, bù lại mỗi route truyền đúng con số của mình vào `deadlineFrom()`.
+
+Một lượt quét dải ngày dài vẫn có thể lâu hơn 300s cho **một** config. Deadline chỉ chặn được giữa các config, không cắt được giữa chừng một config — nên nếu bạn để khoảng ngày rộng, hãy chia thành nhiều config khoảng ngày hẹp.
+
+Còn nếu muốn tránh hẳn mấy giới hạn này: deploy web UI lên Vercel với Blob storage, rồi chạy scraper ở một máy khác (VPS/Docker/máy ở nhà) trỏ vào cùng blob store — cả hai đọc ghi chung một file JSON.
 
 ### Biến môi trường
 
-Chỉ còn đúng một biến, vì mọi thứ khác chỉnh được trên web:
+Chạy local hay Docker thì **không phải đặt biến nào**. Bảng này chỉ dùng khi deploy Vercel hoặc muốn đổi chỗ lưu file:
 
 | Biến | Mặc định | Ý nghĩa |
 |---|---|---|
-| `DATABASE_URL` | `file:./prisma/dev.db` | Đường dẫn file SQLite |
+| `DATA_FILE` | `data/db.json` | Đường dẫn file JSON (khi lưu trên ổ đĩa) |
+| `BLOB_READ_WRITE_TOKEN` | — | Có thì chuyển sang lưu trên Vercel Blob |
+| `BLOB_PATH` | `vietjet-fare-watcher/db.json` | Đường dẫn file trong blob store |
+| `CRON_SECRET` | — | Có thì `/api/cron` đòi `Authorization: Bearer <secret>` |
+| `VERCEL` | Vercel tự đặt | Có thì dùng Chromium của `@sparticuz/chromium` và tắt `worker.ts` |
 
 ## Chỉnh gì trên web
 
@@ -109,11 +161,14 @@ Liệt kê ID trong `roles` giúp ping được cả vai trò **không** bật "
 
 ```
 app/            web UI (1 trang) + API routes
-lib/vietjet.ts  Playwright: điều khiển web Vietjet, parse giá
+lib/vietjet.ts  Playwright: điều khiển web Vietjet, parse giá, chọn Chromium
 lib/runner.ts   quét → lọc theo ngưỡng → chống trùng → bắn noti
 lib/discord.ts  build embed + gửi webhook
 lib/airports.ts danh sách sân bay từ CMS API của Vietjet, cache 24h
-worker.ts       bộ poll: tick mỗi phút, chạy config nào tới hạn
+lib/store.ts    document JSON: đọc/ghi, xếp hàng lượt ghi, chọn file hay blob
+lib/limits.ts   tính deadline cho route quét từ maxDuration của chính nó
+lib/db.ts       thao tác trên document đó: config, alert, cài đặt
+worker.ts       bộ poll: tick mỗi phút, chạy config nào tới hạn (không dùng trên Vercel)
 instrumentation.ts  Next gọi lúc boot để khởi động bộ poll trong cùng process
 scripts/        test-scrape.ts — chạy thử scraper khi Vietjet đổi giao diện
 ```
