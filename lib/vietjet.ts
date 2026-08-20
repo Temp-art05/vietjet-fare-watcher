@@ -433,6 +433,34 @@ async function crashNotes() {
 }
 
 /**
+ * Trang chủ Vietjet không phải lúc nào cũng là trang mình quen: có thể là màn
+ * chặn của WAF, hay một biến thể layout khác vì IP của serverless nằm ở region
+ * khác. Timeout mà không kể lại trang thực sự nhận được thì chỉ biết "không thấy
+ * element", không biết vì sao.
+ */
+async function pageSnapshot(page: Page) {
+  const snap = await page
+    .evaluate(() => ({
+      url: location.href,
+      title: document.title,
+      lang: document.documentElement.lang,
+      oneway: Boolean(document.querySelector('input[value="oneway"]')),
+      arrival: Boolean(document.querySelector("#arrivalPlaceDesktop")),
+      calendar: Boolean(document.querySelector(".rdrCalendarWrapper")),
+      text: (document.body?.innerText || "").replace(/\s+/g, " ").slice(0, 300),
+    }))
+    .catch(() => null);
+  if (!snap) return null;
+
+  const has = [
+    `oneway ${snap.oneway ? "có" : "không"}`,
+    `ô đến ${snap.arrival ? "có" : "không"}`,
+    `lịch ${snap.calendar ? "có" : "không"}`,
+  ].join("/");
+  return `url ${snap.url} · title "${snap.title}" · lang "${snap.lang}" · ${has} · text "${snap.text}"`;
+}
+
+/**
  * Searches one leg and returns the cheapest fare found for every date in the
  * range that has flights. Only dates whose strip price passes `priceCeiling`
  * get a detail fetch, which keeps a wide range cheap to scan.
@@ -446,11 +474,28 @@ export async function searchLeg(params: SearchParams, priceCeiling = Infinity): 
 
   try {
     await page.goto(HOME, { waitUntil: "domcontentloaded", timeout: 90_000 });
-    await page.waitForTimeout(7000);
-    await dismissOverlays(page);
-    await page.waitForTimeout(1000);
 
-    await page.locator('input[value="oneway"]').first().click({ force: true });
+    // Widget tìm chuyến render bằng JS sau khi trang tải, nên chờ đúng nó thay vì
+    // chờ cứng — trang trả nhanh thì đi tiếp luôn, trả chậm thì không hụt. Không
+    // thấy widget thì reload một lần trước khi bỏ cuộc: có lần Vietjet trả về
+    // trang không có nó.
+    const oneway = page.locator('input[value="oneway"]').first();
+    for (let attempt = 0; ; attempt++) {
+      await page.waitForTimeout(3000);
+      await dismissOverlays(page);
+      const found = await oneway
+        .waitFor({ state: "attached", timeout: 25_000 })
+        .then(() => true)
+        .catch(() => false);
+      if (found) break;
+      if (attempt >= 1) {
+        throw new Error(`Trang chủ Vietjet không có widget tìm chuyến — ${await pageSnapshot(page)}`);
+      }
+      await page.reload({ waitUntil: "domcontentloaded", timeout: 90_000 });
+    }
+
+    await page.waitForTimeout(1000);
+    await oneway.click({ force: true });
     await page.waitForTimeout(500);
 
     await fillPlace(page, "origin", origin);
@@ -502,9 +547,11 @@ export async function searchLeg(params: SearchParams, priceCeiling = Infinity): 
 
     return fares;
   } catch (err) {
-    if (looksLikeCrash(err)) {
-      const msg = err instanceof Error ? err.message : String(err);
-      throw new Error(`${msg}\n[chẩn đoán] ${await crashNotes()}`);
+    const msg = err instanceof Error ? err.message : String(err);
+    if (looksLikeCrash(err)) throw new Error(`${msg}\n[chẩn đoán] ${await crashNotes()}`);
+    if (/timeout/i.test(msg)) {
+      const snap = await pageSnapshot(page);
+      if (snap) throw new Error(`${msg}\n[trang lúc lỗi] ${snap}`);
     }
     throw err;
   } finally {
