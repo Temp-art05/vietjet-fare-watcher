@@ -136,35 +136,50 @@ async function fillPlace(page: Page, which: "origin" | "dest", iata: string) {
     which === "dest"
       ? page.locator("#arrivalPlaceDesktop").first()
       : page.locator("input.MuiOutlinedInput-input").first();
-
-  // Trang hay có panel mở ra đè lên ô nhập; lúc đó click thường không tới được
-  // element, phải bắn thẳng vào toạ độ của nó.
-  await input.click({ timeout: 8000 }).catch(() => input.click({ force: true, timeout: 8000 }));
-  await page.waitForTimeout(400);
-
-  // `fill()` set giá trị một nhịp, còn ô này chỉ gọi API gợi ý khi thấy từng ký
-  // tự — phải gõ thật.
-  await input.fill("");
-  await input.pressSequentially(iata, { delay: 120 });
-
-  // Hàng gợi ý hiện mã IATA trong element riêng. Chờ nó xuất hiện thay vì chờ
-  // cứng vài giây: trên serverless mạng chậm hơn máy local, mà đợi cứng thì vừa
-  // hay hụt vừa tốn thời gian khi trang trả nhanh.
   const airportRow = page.getByText(new RegExp(`^\\s*${iata}\\s*$`)).first();
-  const appeared = await airportRow
-    .waitFor({ state: "visible", timeout: 15_000 })
-    .then(() => true)
-    .catch(() => false);
+  const field = which === "dest" ? "điểm đến" : "điểm đi";
 
-  if (appeared) {
-    await airportRow.click({ timeout: 8000 }).catch(() => airportRow.click({ force: true, timeout: 8000 }));
-  } else {
-    // Không thấy hàng nào hiện: chọn gợi ý đầu bằng bàn phím. Click vào element
-    // vô hình thì có chờ bao lâu cũng không xong.
-    await input.press("ArrowDown");
-    await input.press("Enter");
+  // Chọn xong thì ô nhập mang tên kèm mã, kiểu "Hà Nội (HAN)". Kiểm ngay tại đây
+  // thay vì để nó hỏng tiếp ở bước sau: chọn không xong thì panel ngày không mở,
+  // và lỗi hiện ra lại là "không tìm thấy nút sang tháng trong lịch".
+  for (let attempt = 0; attempt < 2; attempt++) {
+    // Trang hay có panel mở ra đè lên ô nhập; lúc đó click thường không tới được
+    // element, phải bắn thẳng vào toạ độ của nó.
+    await input.click({ timeout: 8000 }).catch(() => input.click({ force: true, timeout: 8000 }));
+    await page.waitForTimeout(400);
+
+    // `fill()` set giá trị một nhịp, còn ô này chỉ gọi API gợi ý khi thấy từng ký
+    // tự — phải gõ thật.
+    await input.fill("");
+    await input.pressSequentially(iata, { delay: 120 });
+
+    // Hàng gợi ý hiện mã IATA trong element riêng. Chờ nó xuất hiện thay vì chờ
+    // cứng vài giây: trên serverless mạng chậm hơn máy local, mà đợi cứng thì vừa
+    // hay hụt vừa tốn thời gian khi trang trả nhanh.
+    const appeared = await airportRow
+      .waitFor({ state: "visible", timeout: 15_000 })
+      .then(() => true)
+      .catch(() => false);
+
+    if (appeared) {
+      await airportRow
+        .click({ timeout: 8000 })
+        .catch(() => airportRow.click({ force: true, timeout: 8000 }));
+    } else {
+      // Không thấy hàng nào hiện: chọn gợi ý đầu bằng bàn phím. Click vào element
+      // vô hình thì có chờ bao lâu cũng không xong.
+      await input.press("ArrowDown");
+      await input.press("Enter");
+    }
+    await page.waitForTimeout(1200);
+
+    const value = await input.inputValue().catch(() => "");
+    if (process.env.VJ_TRACE) console.log(`[vietjet] ${which}=${iata} → ô nhập "${value}"`);
+    if (value.toUpperCase().includes(iata.toUpperCase())) return value;
   }
-  await page.waitForTimeout(1200);
+
+  const value = await input.inputValue().catch(() => "");
+  throw new Error(`Không chọn được ${field} ${iata} — ô đang là "${value}"`);
 }
 
 /** Reads every date chip in the slick carousel that currently has a price. */
@@ -543,10 +558,22 @@ export async function searchLeg(
     await fillPlace(page, "dest", dest);
     mark("điểm đi/đến");
 
-    if (!(await page.locator(".rdrCalendarWrapper").first().isVisible().catch(() => false))) {
-      await page.getByText("Ngày đi", { exact: true }).first().click().catch(() => {});
-      await page.waitForTimeout(1000);
+    // Panel lịch thường tự mở sau khi chọn điểm đến; không mở thì bấm "Ngày đi".
+    // Trên serverless nhịp chậm hơn nên phải thử lại, và nếu vẫn không mở thì báo
+    // đúng chuyện đó — chứ để `pickDate` chạy trên trang không có lịch thì lỗi
+    // hiện ra là "không tìm thấy nút sang tháng", trỏ sai chỗ.
+    const calendar = page.locator(".rdrCalendarWrapper").first();
+    for (let attempt = 0; !(await calendar.isVisible().catch(() => false)); attempt++) {
+      if (attempt >= 3) throw new Error(`Không mở được lịch chọn ngày — ${await pageSnapshot(page)}`);
+      await page
+        .getByText("Ngày đi", { exact: true })
+        .first()
+        .click({ timeout: 8000 })
+        .catch(() => {});
+      await calendar.waitFor({ state: "visible", timeout: 8000 }).catch(() => {});
     }
+    mark("mở lịch");
+
     await pickDate(page, from);
     await page.waitForTimeout(1200);
     mark("chọn ngày");
