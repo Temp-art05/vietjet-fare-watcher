@@ -365,7 +365,34 @@ async function sweepTmp() {
   );
 }
 
-type Session = { page: Page; close: () => Promise<void> };
+type Session = { page: Page; close: () => Promise<void>; net: () => string };
+
+/**
+ * Trang có thể render đủ khung mà không có giá nào, vì lời gọi API giá bị chặn
+ * (WAF/reCAPTCHA soi IP datacenter) chứ không phải vì hết vé. Nhìn từ DOM thì hai
+ * chuyện đó giống nhau, nên phải nghe thẳng tầng mạng.
+ */
+function watchNetwork(page: Page) {
+  const status = new Map<string, number>();
+  const flagged: string[] = [];
+
+  page.on("response", (res) => {
+    const url = res.url();
+    const code = res.status();
+    const type = res.request().resourceType();
+    if (type === "xhr" || type === "fetch") {
+      const key = `${type} ${code}`;
+      status.set(key, (status.get(key) ?? 0) + 1);
+    }
+    const suspicious = code >= 400 || /awswaf|captcha|challenge|blocked/i.test(url);
+    if (suspicious && flagged.length < 8) flagged.push(`${code} ${url.slice(0, 110)}`);
+  });
+
+  return () => {
+    const counts = [...status.entries()].map(([k, n]) => `${k}×${n}`).join(", ") || "không có xhr/fetch";
+    return flagged.length ? `${counts} · đáng ngờ: ${flagged.join(" | ")}` : counts;
+  };
+}
 
 /**
  * Một lượt search một tab, và luôn là một "khách lần đầu": cookie/storage rỗng,
@@ -386,7 +413,7 @@ async function openSession(profile: (typeof PROFILES)[number]): Promise<Session>
     const ctx = await browser.newContext({ ...asGuest, storageState: undefined });
     await ctx.clearCookies();
     const page = await ctx.newPage();
-    return { page, close: () => ctx.close().catch(() => {}) };
+    return { page, close: () => ctx.close().catch(() => {}), net: watchNetwork(page) };
   }
 
   // Serverless: `--single-process` chặn `newContext()`, nên dùng default context
@@ -405,6 +432,7 @@ async function openSession(profile: (typeof PROFILES)[number]): Promise<Session>
   const page = ctx.pages()[0] ?? (await ctx.newPage());
   return {
     page,
+    net: watchNetwork(page),
     close: async () => {
       await ctx.close().catch(() => {});
       await rm(dir, { recursive: true, force: true }).catch(() => {});
@@ -648,7 +676,8 @@ export async function searchLeg(
         })
         .catch(() => null);
       throw new Error(
-        `Không đọc được giá nào cho ${origin}→${dest} — ${JSON.stringify(seen)}\n[mốc] ${marks.join(" · ")}`,
+        `Không đọc được giá nào cho ${origin}→${dest} — ${JSON.stringify(seen)}` +
+          `\n[mạng] ${session.net()}\n[mốc] ${marks.join(" · ")}`,
       );
     }
 
