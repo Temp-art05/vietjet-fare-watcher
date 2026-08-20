@@ -126,10 +126,11 @@ function blobDriver(): Driver {
     kind: "blob",
     name: `blob:${pathname}`,
     async load() {
-      const { head, BlobNotFoundError } = await import("@vercel/blob");
+      const { head, BlobNotFoundError, get } = await import("@vercel/blob");
 
-      // `head` đi qua API của blob store, không qua CDN, nên luôn thấy trạng thái
-      // mới nhất — kể cả URL của bản vừa ghi.
+      // `head` đi qua API của blob store, không qua CDN, nên `size`/`etag` nó trả
+      // về là của bản mới nhất — dùng làm mốc để biết bản đọc được có phải bản mới
+      // hay là bản cũ CDN còn giữ.
       let meta;
       try {
         meta = await head(pathname, { token });
@@ -141,15 +142,36 @@ function blobDriver(): Driver {
         throw err;
       }
 
-      // Đọc thẳng URL kèm tham số phá cache thay vì `get(..., useCache: false)`:
-      // cờ đó chỉ thật sự bỏ cache khi access là private (`@vercel/blob/dist/
-      // index.js:146`), còn blob public đi qua CDN nên cờ bị bỏ qua và trả bản cũ.
-      // Đọc ra bản cũ thì lượt ghi kế tiếp dựng trên đó và xoá mất thay đổi vừa
-      // rồi — config mới, lastError, lịch sử noti đều có thể bốc hơi.
-      const res = await fetch(`${meta.url}?cache=0&ts=${Date.now()}`, { cache: "no-store" });
-      if (res.status === 404) return null;
-      if (!res.ok) throw new Error(`Vercel Blob: đọc thất bại ${res.status} ${res.statusText}`);
-      return res.text();
+      // `get(..., useCache: false)` KHÔNG bỏ được cache với blob public: cờ đó chỉ
+      // có tác dụng khi access là private (`@vercel/blob/dist/index.js:146`). Còn
+      // URL public thì từ chối tham số lạ (400), nên không phá cache bằng query
+      // được. Cách còn lại: đọc rồi so với `size` của bản mới nhất, lệch thì thử
+      // lại — `downloadUrl` là một cache key khác nên hai đường thay nhau có cơ
+      // hội gặp bản mới.
+      const urls = [meta.url, meta.downloadUrl];
+      let text: string | null = null;
+
+      for (let attempt = 0; attempt < 4; attempt++) {
+        const res = await fetch(urls[attempt % urls.length], { cache: "no-store" });
+        if (res.status === 404) return null;
+        if (!res.ok) continue;
+        const body = await res.text();
+        // `size` tính theo byte, `body.length` theo ký tự UTF-16 — so bằng byte.
+        if (new TextEncoder().encode(body).length === meta.size) return body;
+        text = body;
+      }
+
+      // Không lần nào khớp: thà trả bản đọc được (kèm cảnh báo) hơn là coi như
+      // chưa có gì, vì "chưa có gì" sẽ bị lượt ghi kế tiếp biến thành mất dữ liệu.
+      if (text !== null) {
+        console.warn(`[store] blob đọc được không khớp size mới nhất (${meta.size}B) — có thể là bản cũ`);
+        return text;
+      }
+
+      // Mọi lượt fetch đều lỗi: quay về đường của SDK.
+      const res = await get(pathname, { access: "public", useCache: false, token });
+      if (!res?.stream) return null;
+      return new Response(res.stream).text();
     },
     async save(text) {
       const { put } = await import("@vercel/blob");
