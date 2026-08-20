@@ -68,7 +68,9 @@ Thiếu bước này thì app rơi về ghi file trên ổ đĩa, mà ổ đĩa 
 
 - `playwright-core` (không kèm browser) nằm ở `dependencies`; `playwright` đầy đủ chỉ là `devDependency` để chạy local
 - Hai package **phải khớp phiên bản Chromium**: `playwright-core@1.61` và `@sparticuz/chromium@149` cùng dùng Chromium 149. Nâng cái này thì nâng cả cái kia
-- Vài cờ mà `@sparticuz/chromium` khuyến nghị lại phá Playwright — `--single-process` làm hỏng `browser.newContext()`, `--headless='shell'` chồng lên chế độ headless Playwright tự đặt — nên chúng bị lọc ra trong `launchOptions()`
+- `--single-process` của `@sparticuz/chromium` là cờ **phải giữ**: thiếu nó, lần navigate đầu tiên phải spawn renderer riêng và trên Lambda việc đó chết (`prctl(PR_SET_NO_NEW_PRIVS) failed`) — browser sập, Playwright chỉ báo lại `Target page, context or browser has been closed`. Đổi lại `browser.newContext()` không dùng được, nên nhánh serverless đi bằng `launchPersistentContext` với một profile rỗng trong `/tmp` (`openSession()` trong `lib/vietjet.ts`): default context, mà vẫn xoay được user agent và cỡ cửa sổ. Cờ duy nhất bị lọc ra là `--headless='shell'`, vì Playwright tự đặt `--headless`
+- Profile trong `/tmp` được xoá khi đóng; thư mục sót lại từ invocation bị chém giữa đường thì lượt sau dọn, vì `/tmp` chỉ có 512MB mà Chromium giải nén đã chiếm một phần
+- Đặt `VJ_GRAPHICS=0` nếu nghi thiếu RAM: tắt WebGL/swiftshader cho nhẹ, đánh đổi là reCAPTCHA v3 dễ nghi hơn
 - Binary Chromium là mấy file `.br` chỉ mở lúc chạy, bộ dò phụ thuộc của Next không thấy, nên `outputFileTracingIncludes` trong `next.config.mjs` khai tay cho từng route có quét. Bundle ra khoảng **75 MB**, thoải mái dưới hạn 250 MB
 
 **3. Lịch quét.** `worker.ts` không sống trên serverless (process đóng ngay sau mỗi request), nên `instrumentation.ts` tự bỏ qua khi thấy biến `VERCEL`. Thay vào đó `vercel.json` khai Cron gọi `/api/cron`, làm đúng việc bộ poll vẫn làm. Đặt `CRON_SECRET` trong Project Settings để chặn request lạ.

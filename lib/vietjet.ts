@@ -1,3 +1,6 @@
+import { mkdtemp, readdir, rm, stat, statfs } from "node:fs/promises";
+import { freemem, tmpdir, totalmem } from "node:os";
+import { join } from "node:path";
 import { chromium, type Browser, type LaunchOptions, type Page } from "playwright-core";
 
 export type Fare = {
@@ -225,14 +228,22 @@ let shared: Browser | null = null;
 const STEALTH_ARG = "--disable-blink-features=AutomationControlled";
 
 /**
- * Playwright không chạy được với vài cờ mà @sparticuz/chromium khuyến nghị cho
- * Puppeteer: `--single-process` phá `browser.newContext()` (mỗi lượt search đều
- * mở một context mới), còn `--headless='shell'` chồng lên chế độ headless mà
- * Playwright tự đặt.
+ * Cờ duy nhất phải bỏ: `--headless='shell'` chồng lên `--headless` mà Playwright
+ * tự đặt cho bản headless_shell.
+ *
+ * `--single-process` thì PHẢI giữ, dù nó chặn `browser.newContext()`: không có
+ * nó, lần navigate đầu tiên phải spawn renderer riêng và trên Lambda việc đó
+ * chết với `prctl(PR_SET_NO_NEW_PRIVS) failed` — browser sập, Playwright chỉ
+ * báo lại "Target page, context or browser has been closed". Bù cho chỗ mất
+ * `newContext()`, nhánh serverless đi bằng `launchPersistentContext` trong
+ * `openSession()`.
  */
-const INCOMPATIBLE = ["--single-process", "--headless"];
+const INCOMPATIBLE = ["--headless"];
 
 const isServerless = () => Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
+
+/** WebGL bật là mặc định; `VJ_GRAPHICS=0` tắt để chạy nhẹ hơn. */
+const graphicsOn = () => process.env.VJ_GRAPHICS !== "0";
 
 async function launchOptions(): Promise<LaunchOptions> {
   if (!isServerless()) {
@@ -243,8 +254,12 @@ async function launchOptions(): Promise<LaunchOptions> {
   // Serverless: ổ đĩa không có sẵn Chromium, phải giải nén bản đóng gói kèm.
   const { default: chromiumPack } = await import("@sparticuz/chromium");
 
-  // Giữ nguyên graphics stack (mặc định bật): tắt đi thì nhanh hơn nhưng mất
-  // WebGL, mà reCAPTCHA v3 của Vietjet soi đúng những thứ như thế.
+  // Giữ nguyên graphics stack (mặc định bật): tắt đi thì nhẹ RAM hơn nhưng mất
+  // WebGL, mà reCAPTCHA v3 của Vietjet soi đúng những thứ như thế. `VJ_GRAPHICS=0`
+  // là cửa mở sẵn để thử nhánh nhẹ khi nghi thiếu RAM — phải đặt trước khi đọc
+  // `args`, vì cờ swiftshader nằm trong chính getter đó.
+  if (!graphicsOn()) chromiumPack.setGraphicsMode = false;
+
   const args = chromiumPack.args.filter((a) => !INCOMPATIBLE.some((bad) => a.startsWith(bad)));
 
   return {
@@ -256,13 +271,106 @@ async function launchOptions(): Promise<LaunchOptions> {
 
 async function getBrowser() {
   if (shared?.isConnected()) return shared;
-  shared = await chromium.launch(await launchOptions());
-  return shared;
+  const browser = await chromium.launch(await launchOptions());
+  // Browser chết (crash, hoặc process bị serverless chém) thì lượt sau không
+  // được nhặt lại cái handle đã hỏng — `isConnected()` một mình không đủ.
+  browser.on("disconnected", () => {
+    if (shared === browser) shared = null;
+  });
+  shared = browser;
+  return browser;
 }
 
 export async function closeBrowser() {
   await shared?.close().catch(() => {});
   shared = null;
+}
+
+const PROFILE_PREFIX = "vj-profile-";
+
+/**
+ * Invocation bị chém giữa đường để lại nguyên thư mục profile trong `/tmp`, mà
+ * `/tmp` trên serverless chỉ có 512MB và đã mất một phần cho Chromium giải nén.
+ * Dồn vài lượt là hết chỗ ghi và chromium crash vì lý do khác hẳn. Chỉ xoá thư
+ * mục cũ hơn 5 phút, để không phá invocation đang chạy song song cùng instance.
+ */
+async function sweepTmp() {
+  const root = tmpdir();
+  const cutoff = Date.now() - 5 * 60_000;
+  const names = await readdir(root).catch(() => [] as string[]);
+  await Promise.all(
+    names
+      .filter((n) => n.startsWith(PROFILE_PREFIX) || n.startsWith("playwright"))
+      .map(async (name) => {
+        const path = join(root, name);
+        const info = await stat(path).catch(() => null);
+        if (!info || info.mtimeMs > cutoff) return;
+        await rm(path, { recursive: true, force: true }).catch(() => {});
+      }),
+  );
+}
+
+type Session = { page: Page; close: () => Promise<void> };
+
+/**
+ * Một lượt search một tab, và luôn là một "khách lần đầu": cookie/storage rỗng,
+ * user agent và cỡ cửa sổ xoay theo `PROFILES`.
+ */
+async function openSession(profile: (typeof PROFILES)[number]): Promise<Session> {
+  const asGuest = {
+    userAgent: profile.ua,
+    locale: "vi-VN",
+    timezoneId: "Asia/Ho_Chi_Minh",
+    viewport: profile.viewport,
+  };
+
+  if (!isServerless()) {
+    // Local/Docker: một browser dùng chung cho cả tiến trình, mỗi lượt search
+    // một context mới — đúng nghĩa cửa sổ ẩn danh.
+    const browser = await getBrowser();
+    const ctx = await browser.newContext({ ...asGuest, storageState: undefined });
+    await ctx.clearCookies();
+    const page = await ctx.newPage();
+    return { page, close: () => ctx.close().catch(() => {}) };
+  }
+
+  // Serverless: `--single-process` chặn `newContext()`, nên dùng default context
+  // của một profile mới toanh trong `/tmp`. Profile rỗng thay cho cửa sổ ẩn danh,
+  // và xoá thư mục lúc đóng thì không có gì theo sang lượt sau.
+  await sweepTmp();
+  const dir = await mkdtemp(join(tmpdir(), PROFILE_PREFIX));
+  const ctx = await chromium.launchPersistentContext(dir, { ...(await launchOptions()), ...asGuest });
+  const page = ctx.pages()[0] ?? (await ctx.newPage());
+  return {
+    page,
+    close: async () => {
+      await ctx.close().catch(() => {});
+      await rm(dir, { recursive: true, force: true }).catch(() => {});
+    },
+  };
+}
+
+const mb = (bytes: number) => Math.round(bytes / 1_048_576);
+
+function looksLikeCrash(err: unknown) {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /has been closed|Target closed|Target crashed|browser has disconnected/i.test(msg);
+}
+
+/**
+ * Chromium sập thì Playwright chỉ nói "browser has been closed", không nói vì
+ * sao. Đính trạng thái máy vào message để dòng lỗi hiện trên web tự tố nguyên
+ * nhân — hết RAM, hay hết chỗ trong `/tmp`.
+ */
+async function crashNotes() {
+  const notes = [
+    `RAM đã dùng ${mb(totalmem() - freemem())}/${mb(totalmem())}MB`,
+    `RSS ${mb(process.memoryUsage().rss)}MB`,
+  ];
+  const fs = await statfs(tmpdir()).catch(() => null);
+  if (fs) notes.push(`/tmp còn ${mb(Number(fs.bfree) * Number(fs.bsize))}MB`);
+  notes.push(`graphics ${graphicsOn() ? "on" : "off"}`);
+  return notes.join(", ");
 }
 
 /**
@@ -272,19 +380,10 @@ export async function closeBrowser() {
  */
 export async function searchLeg(params: SearchParams, priceCeiling = Infinity): Promise<Fare[]> {
   const { origin, dest, from, to } = params;
-  const browser = await getBrowser();
   const profile = PROFILES[Math.floor(Math.random() * PROFILES.length)];
-  // A fresh context is an incognito window: empty cookie jar and storage, thrown
-  // away in the `finally` below so nothing follows us into the next search.
-  const ctx = await browser.newContext({
-    userAgent: profile.ua,
-    locale: "vi-VN",
-    timezoneId: "Asia/Ho_Chi_Minh",
-    viewport: profile.viewport,
-    storageState: undefined,
-  });
-  await ctx.clearCookies();
-  const page = await ctx.newPage();
+  // Session bị bỏ đi ở `finally` bên dưới nên không có gì theo sang lượt sau.
+  const session = await openSession(profile);
+  const page = session.page;
 
   try {
     await page.goto(HOME, { waitUntil: "domcontentloaded", timeout: 90_000 });
@@ -343,8 +442,14 @@ export async function searchLeg(params: SearchParams, priceCeiling = Infinity): 
     }
 
     return fares;
+  } catch (err) {
+    if (looksLikeCrash(err)) {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new Error(`${msg}\n[chẩn đoán] ${await crashNotes()}`);
+    }
+    throw err;
   } finally {
-    await ctx.close().catch(() => {});
+    await session.close();
   }
 }
 
