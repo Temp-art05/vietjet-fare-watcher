@@ -126,34 +126,40 @@ function blobDriver(): Driver {
     kind: "blob",
     name: `blob:${pathname}`,
     async load() {
-      const { get } = await import("@vercel/blob");
-      // Phải là `private`, không phải vì bí mật mà vì tính đúng đắn: `useCache:
-      // false` chỉ thật sự bỏ cache khi access là private — xem
-      // `@vercel/blob/dist/index.js:146`, blob public đi qua CDN và cờ đó bị bỏ
-      // qua. Để public thì ghi xong đọc lại vẫn ra bản cũ, lượt ghi kế tiếp dựng
-      // trên dữ liệu cũ và xoá mất thay đổi vừa rồi. Kèm theo, private đóng luôn
-      // chuyện ai biết URL là đọc được cả webhook Discord trong file.
-      const res = await get(pathname, { access: "private", useCache: false, token });
-      // `get` trả null đúng khi chưa có file. Mọi lỗi khác (token sai, store bị
-      // xoá…) phải ném lên — nuốt nó thành "chưa có gì" là ghi đè sạch dữ liệu.
-      if (res?.stream) return new Response(res.stream).text();
+      const { head, BlobNotFoundError } = await import("@vercel/blob");
 
-      // Bản deploy trước cất blob ở chế độ public, và private/public là hai URL
-      // khác nhau nên lượt đọc trên không thấy nó. Đọc nốt một lần để không mất
-      // dữ liệu cũ; lượt ghi kế tiếp tự chuyển pathname đó sang private.
-      const legacy = await get(pathname, { access: "public", useCache: false, token });
-      if (!legacy?.stream) return null;
-      return new Response(legacy.stream).text();
+      // `head` đi qua API của blob store, không qua CDN, nên luôn thấy trạng thái
+      // mới nhất — kể cả URL của bản vừa ghi.
+      let meta;
+      try {
+        meta = await head(pathname, { token });
+      } catch (err) {
+        // Chưa có file là chuyện bình thường (lần chạy đầu). Mọi lỗi khác (token
+        // sai, store bị xoá…) phải ném lên — nuốt nó thành "chưa có gì" là ghi đè
+        // sạch dữ liệu.
+        if (err instanceof BlobNotFoundError) return null;
+        throw err;
+      }
+
+      // Đọc thẳng URL kèm tham số phá cache thay vì `get(..., useCache: false)`:
+      // cờ đó chỉ thật sự bỏ cache khi access là private (`@vercel/blob/dist/
+      // index.js:146`), còn blob public đi qua CDN nên cờ bị bỏ qua và trả bản cũ.
+      // Đọc ra bản cũ thì lượt ghi kế tiếp dựng trên đó và xoá mất thay đổi vừa
+      // rồi — config mới, lastError, lịch sử noti đều có thể bốc hơi.
+      const res = await fetch(`${meta.url}?cache=0&ts=${Date.now()}`, { cache: "no-store" });
+      if (res.status === 404) return null;
+      if (!res.ok) throw new Error(`Vercel Blob: đọc thất bại ${res.status} ${res.statusText}`);
+      return res.text();
     },
     async save(text) {
       const { put } = await import("@vercel/blob");
       await put(pathname, text, {
-        access: "private",
+        access: "public",
         token,
         contentType: "application/json",
         addRandomSuffix: false,
         allowOverwrite: true,
-        // Ghi xong là phải đọc được ngay; đừng để tầng cache nào giữ bản cũ.
+        // Bớt việc cho tầng cache: bản mới không bị CDN giữ lại lâu.
         cacheControlMaxAge: 0,
       });
     },
