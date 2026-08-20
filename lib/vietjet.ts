@@ -133,19 +133,28 @@ async function fillPlace(page: Page, which: "origin" | "dest", iata: string) {
   // element, phải bắn thẳng vào toạ độ của nó.
   await input.click({ timeout: 8000 }).catch(() => input.click({ force: true, timeout: 8000 }));
   await page.waitForTimeout(400);
-  await input.fill(iata);
-  await page.waitForTimeout(2000);
 
-  // The suggestion row shows the IATA code in its own element; click that row.
-  const option = page
-    .locator("div")
-    .filter({ hasText: new RegExp(`\\b${iata}\\b`) })
-    .last();
+  // `fill()` set giá trị một nhịp, còn ô này chỉ gọi API gợi ý khi thấy từng ký
+  // tự — phải gõ thật.
+  await input.fill("");
+  await input.pressSequentially(iata, { delay: 120 });
+
+  // Hàng gợi ý hiện mã IATA trong element riêng. Chờ nó xuất hiện thay vì chờ
+  // cứng vài giây: trên serverless mạng chậm hơn máy local, mà đợi cứng thì vừa
+  // hay hụt vừa tốn thời gian khi trang trả nhanh.
   const airportRow = page.getByText(new RegExp(`^\\s*${iata}\\s*$`)).first();
-  if (await airportRow.count()) {
-    await airportRow.click({ timeout: 8000 });
+  const appeared = await airportRow
+    .waitFor({ state: "visible", timeout: 15_000 })
+    .then(() => true)
+    .catch(() => false);
+
+  if (appeared) {
+    await airportRow.click({ timeout: 8000 }).catch(() => airportRow.click({ force: true, timeout: 8000 }));
   } else {
-    await option.click({ timeout: 8000 });
+    // Không thấy hàng nào hiện: chọn gợi ý đầu bằng bàn phím. Click vào element
+    // vô hình thì có chờ bao lâu cũng không xong.
+    await input.press("ArrowDown");
+    await input.press("Enter");
   }
   await page.waitForTimeout(1200);
 }
