@@ -129,7 +129,9 @@ async function fillPlace(page: Page, which: "origin" | "dest", iata: string) {
       ? page.locator("#arrivalPlaceDesktop").first()
       : page.locator("input.MuiOutlinedInput-input").first();
 
-  await input.click();
+  // Trang hay có panel mở ra đè lên ô nhập; lúc đó click thường không tới được
+  // element, phải bắn thẳng vào toạ độ của nó.
+  await input.click({ timeout: 8000 }).catch(() => input.click({ force: true, timeout: 8000 }));
   await page.waitForTimeout(400);
   await input.fill(iata);
   await page.waitForTimeout(2000);
@@ -358,14 +360,12 @@ async function openSession(profile: (typeof PROFILES)[number]): Promise<Session>
   await sweepTmp();
   const dir = await mkdtemp(join(tmpdir(), PROFILE_PREFIX));
   const ctx = await chromium.launchPersistentContext(dir, { ...(await launchOptions()), ...asGuest });
-  // Ảnh, video và font không giúp gì cho việc đọc giá, mà chúng là phần lớn thứ
-  // chromium ghi vào cache và giữ trong RAM. CSS thì vẫn để, vì layout còn quyết
-  // định element nào "hiện" khi code đi tìm.
-  await ctx.route("**/*", (route) => {
-    const type = route.request().resourceType();
-    if (type === "image" || type === "media" || type === "font") return route.abort();
-    return route.continue();
-  });
+  // Chỉ chặn video: nó nặng nhất mà không ảnh hưởng layout. Ảnh và font thì phải
+  // để — chặn hai thứ đó, trang co lại khác hẳn local và accordion trong trang
+  // đè lên đúng ô nhập điểm đến, click không tới được.
+  await ctx.route("**/*", (route) =>
+    route.request().resourceType() === "media" ? route.abort() : route.continue(),
+  );
 
   const page = ctx.pages()[0] ?? (await ctx.newPage());
   return {
