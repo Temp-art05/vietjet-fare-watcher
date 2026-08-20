@@ -312,7 +312,12 @@ export default function Home() {
             `và giá không đổi nên không bắn lại. Muốn thử webhook thì bấm "Gửi thử".`,
         );
       else if (r.matched === 0)
-        setError(`${c.name}: quét ${r.scanned} vé, không có vé nào vào ngưỡng giá.`);
+        setError(
+          `${c.name}: quét ${r.scanned} vé, không có vé nào vào ngưỡng giá.` +
+            (r.datesSeen
+              ? ` Đọc được giá của ${r.datesSeen} ngày, thấp nhất ${vnd(r.cheapestSeen)}.`
+              : " Không đọc được giá của ngày nào — có thể trang đổi giao diện."),
+        );
       else setError(`${c.name}: quét ${r.scanned} vé, khớp ${r.matched}, bắn ${r.notified} noti.`);
     } finally {
       setBusy(null);

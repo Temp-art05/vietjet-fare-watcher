@@ -1,13 +1,18 @@
 import { createAlert, knownFingerprints, listEnabledConfigs, markConfigRun } from "./db";
 import type { WatchConfig } from "./store";
 import { sendDiscord, type AlertPayload } from "./discord";
-import { bookingUrl, searchLeg, type Fare } from "./vietjet";
+import { bookingUrl, searchLeg, type Fare, type LegResult } from "./vietjet";
 
 export type RunResult = {
   configId: string;
   scanned: number;
   matched: number;
   notified: number;
+  /** Số ngày đọc được giá trên dải ngày của trang, kể cả ngày trên ngưỡng. */
+  datesSeen: number;
+  /** Giá thấp nhất nhìn thấy, kể cả khi nó trên ngưỡng — để phân biệt "không có
+   * vé rẻ" với "không đọc được gì". */
+  cheapestSeen: number | null;
   error?: string;
 };
 
@@ -98,7 +103,14 @@ function buildCandidates(config: WatchConfig, out: Fare[], ret: Fare[]): Candida
 }
 
 export async function runConfig(config: WatchConfig, deadline?: number): Promise<RunResult> {
-  const result: RunResult = { configId: config.id, scanned: 0, matched: 0, notified: 0 };
+  const result: RunResult = {
+    configId: config.id,
+    scanned: 0,
+    matched: 0,
+    notified: 0,
+    datesSeen: 0,
+    cheapestSeen: null,
+  };
 
   try {
     const outbound = await searchLeg(
@@ -107,7 +119,7 @@ export async function runConfig(config: WatchConfig, deadline?: number): Promise
       deadline,
     );
 
-    let inbound: Fare[] = [];
+    let inbound: LegResult = { fares: [], datesSeen: 0, cheapestSeen: null };
     if (config.tripType === "roundtrip") {
       if (!config.returnFrom || !config.returnTo) {
         throw new Error("Config khứ hồi nhưng thiếu khoảng ngày về");
@@ -123,9 +135,12 @@ export async function runConfig(config: WatchConfig, deadline?: number): Promise
         deadline,
       );
     }
-    result.scanned = outbound.length + inbound.length;
+    result.scanned = outbound.fares.length + inbound.fares.length;
+    result.datesSeen = outbound.datesSeen + inbound.datesSeen;
+    const seen = [outbound.cheapestSeen, inbound.cheapestSeen].filter((p): p is number => p !== null);
+    result.cheapestSeen = seen.length ? Math.min(...seen) : null;
 
-    const candidates = buildCandidates(config, outbound, inbound);
+    const candidates = buildCandidates(config, outbound.fares, inbound.fares);
     result.matched = candidates.length;
 
     // Skip anything already announced; the price is part of the fingerprint, so a

@@ -436,6 +436,17 @@ async function crashNotes() {
 }
 
 /**
+ * Ngoài vé đã lọc theo ngưỡng, một lượt quét còn biết "dải ngày có gì": bao nhiêu
+ * ngày có giá và giá thấp nhất trong đó. Không có hai số này thì `quét 0 vé` vừa
+ * có thể là không đọc được gì, vừa có thể là không ngày nào dưới ngưỡng.
+ */
+export type LegResult = {
+  fares: Fare[];
+  datesSeen: number;
+  cheapestSeen: number | null;
+};
+
+/**
  * Trang chủ Vietjet không phải lúc nào cũng là trang mình quen: có thể là màn
  * chặn của WAF, hay một biến thể layout khác vì IP của serverless nằm ở region
  * khác. Timeout mà không kể lại trang thực sự nhận được thì chỉ biết "không thấy
@@ -472,7 +483,7 @@ export async function searchLeg(
   params: SearchParams,
   priceCeiling = Infinity,
   deadline?: number,
-): Promise<Fare[]> {
+): Promise<LegResult> {
   const { origin, dest, from, to } = params;
   const profile = PROFILES[Math.floor(Math.random() * PROFILES.length)];
   // Session bị bỏ đi ở `finally` bên dưới nên không có gì theo sang lượt sau.
@@ -576,16 +587,20 @@ export async function searchLeg(
       else fares.push({ date, price: strip, flightNo: null, depTime: null, arrTime: null });
     }
 
+    const cheapestSeen = lowest.size ? Math.min(...lowest.values()) : null;
     mark("xong");
-    console.log(`[vietjet] ${origin}→${dest}: ${marks.join(" · ")}`);
+    console.log(
+      `[vietjet] ${origin}→${dest}: ${marks.join(" · ")} · dải ngày ${lowest.size} ngày` +
+        `${cheapestSeen ? `, thấp nhất ${cheapestSeen.toLocaleString("vi-VN")}` : ""}`,
+    );
 
-    // Hết giờ mà chưa kịp đọc gì thì đừng báo "quét 0 vé" như thể không có chuyến
+    // Hết giờ mà chưa đọc được gì thì đừng báo "quét 0 vé" như thể không có chuyến
     // nào — nói thẳng là hết giờ, kèm bước nào ăn bao lâu.
-    if (!fares.length && outOfTime()) {
+    if (!lowest.size && outOfTime()) {
       throw new Error(`Hết giờ khi quét ${origin}→${dest} — ${marks.join(" · ")}`);
     }
 
-    return fares;
+    return { fares, datesSeen: lowest.size, cheapestSeen };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     mark("lỗi");
