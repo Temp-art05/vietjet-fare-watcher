@@ -56,7 +56,9 @@ Web ở `http://<host>:3000`. File JSON nằm trên volume `watcher-data` nên c
 
 ### Vercel
 
-Chạy được cả bộ, kể cả phần scrape. Ba thứ đã được chuẩn bị sẵn trong repo:
+> **Giới hạn không sửa được bằng code:** Vietjet chọn tiền tệ **theo IP ở phía server** (trang không có nút đổi tiền tệ — dropdown ở header chỉ đổi ngôn ngữ). Function của Vercel nằm ngoài Việt Nam nên trang trả giá bằng **USD**, trong khi ngưỡng giá của config là VND ⇒ không so được, và tool sẽ báo đúng chuyện đó chứ không im lặng. Muốn chạy trên Vercel thì phải đặt `VJ_PROXY=http://user:pass@host:port` trỏ vào một proxy Việt Nam. Không có proxy thì dùng bản Docker/VPS đặt ở Việt Nam — đó là cách chạy được ngay.
+
+Phần còn lại chạy được cả bộ, kể cả scrape. Ba thứ đã được chuẩn bị sẵn trong repo:
 
 **1. Lưu dữ liệu — bắt buộc.** Tạo Blob store (Storage → Blob → Create), Vercel tự thêm `BLOB_READ_WRITE_TOKEN`. **Phải Redeploy sau khi tạo**: biến môi trường chỉ có hiệu lực với deployment mới, bản đang chạy không tự nhận.
 

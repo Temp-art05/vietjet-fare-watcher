@@ -158,7 +158,7 @@ async function fillPlace(page: Page, which: "origin" | "dest", iata: string) {
   // Chọn xong thì ô nhập mang tên kèm mã, kiểu "Hà Nội (HAN)". Kiểm ngay tại đây
   // thay vì để nó hỏng tiếp ở bước sau: chọn không xong thì panel ngày không mở,
   // và lỗi hiện ra lại là "không tìm thấy nút sang tháng trong lịch".
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let attempt = 0; attempt < 3; attempt++) {
     // Gắn lại mỗi lượt: React render lại là attribute bay mất.
     if (!(await tagPlaceInputs(page))) {
       throw new Error(`Không thấy ô nhập ${field} trên trang — ${await pageSnapshot(page)}`);
@@ -173,6 +173,13 @@ async function fillPlace(page: Page, which: "origin" | "dest", iata: string) {
     // tự — phải gõ thật.
     await input.fill("");
     await input.pressSequentially(iata, { delay: 120 });
+
+    // Trang chủ hydrate xong mới nhận input; gõ sớm thì React render lại là mất
+    // sạch. Ký tự chưa vào ô thì chờ gợi ý cũng vô nghĩa — thử lại luôn.
+    if (!(await input.inputValue().catch(() => "")).toUpperCase().includes(iata.toUpperCase())) {
+      await page.waitForTimeout(1500);
+      continue;
+    }
 
     // Hàng gợi ý hiện mã IATA trong element riêng. Chờ nó xuất hiện thay vì chờ
     // cứng vài giây: trên serverless mạng chậm hơn máy local, mà đợi cứng thì vừa
@@ -300,13 +307,35 @@ const INCOMPATIBLE = ["--headless"];
 
 const isServerless = () => Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
 
+/**
+ * Vietjet chọn tiền tệ theo IP ở phía server (trang không có nút đổi tiền tệ —
+ * dropdown ở header chỉ có ngôn ngữ). Chạy từ nước ngoài là giá ra USD, mà ngưỡng
+ * của config là VND nên không so được. `VJ_PROXY` là đường để một bản deploy ngoài
+ * Việt Nam vẫn đi ra bằng IP Việt Nam.
+ *
+ *   VJ_PROXY=http://user:pass@host:port
+ */
+function proxyOption() {
+  const raw = process.env.VJ_PROXY;
+  if (!raw) return undefined;
+  try {
+    const url = new URL(raw);
+    const auth = url.username ? { username: decodeURIComponent(url.username), password: decodeURIComponent(url.password) } : {};
+    return { server: `${url.protocol}//${url.host}`, ...auth };
+  } catch {
+    throw new Error(`VJ_PROXY không phải URL hợp lệ: ${raw}`);
+  }
+}
+
 /** WebGL bật là mặc định; `VJ_GRAPHICS=0` tắt để chạy nhẹ hơn. */
 const graphicsOn = () => process.env.VJ_GRAPHICS !== "0";
 
 async function launchOptions(): Promise<LaunchOptions> {
+  const proxy = proxyOption();
+
   if (!isServerless()) {
     // Local/Docker: dùng Chromium do `npx playwright install chromium` tải về.
-    return { headless: true, args: [STEALTH_ARG, "--no-sandbox"] };
+    return { headless: true, args: [STEALTH_ARG, "--no-sandbox"], proxy };
   }
 
   // Serverless: ổ đĩa không có sẵn Chromium, phải giải nén bản đóng gói kèm.
@@ -330,6 +359,7 @@ async function launchOptions(): Promise<LaunchOptions> {
     headless: true,
     executablePath: await chromiumPack.executablePath(),
     args: [...args, STEALTH_ARG],
+    proxy,
   };
 }
 
@@ -696,6 +726,20 @@ export async function searchLeg(
           };
         })
         .catch(() => null);
+      // Giá có thể đang hiện bằng tiền tệ khác: Vietjet chọn theo IP, và ngưỡng
+      // của config là VND nên không so được. Nói thẳng ra, đừng để nó trông giống
+      // "trang đổi giao diện".
+      const other = seen?.sample.join(" ").match(/\b(USD|EUR|AUD|SGD|KRW|JPY|TWD|THB|CNY|HKD|MYR|INR|CAD|GBP)\b/);
+      if (other) {
+        const region = process.env.VERCEL_REGION ? ` (region ${process.env.VERCEL_REGION})` : "";
+        throw new Error(
+          `Trang đang trả giá bằng ${other[1]}, không phải VND — Vietjet chọn tiền tệ theo IP và bản deploy này` +
+            `${region} nằm ngoài Việt Nam. Ngưỡng giá của config là VND nên không so được. Chạy từ IP Việt Nam` +
+            ` (bản Docker/VPS) hoặc đặt VJ_PROXY=http://user:pass@host:port trỏ vào proxy Việt Nam.` +
+            `\n[dải ngày] ${seen?.sample.join(" | ")}\n[mốc] ${marks.join(" · ")}`,
+        );
+      }
+
       throw new Error(
         `Không đọc được giá nào cho ${origin}→${dest} — ${JSON.stringify(seen)}` +
           `\n[mạng] ${session.net()}\n[mốc] ${marks.join(" · ")}`,
