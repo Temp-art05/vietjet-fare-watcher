@@ -65,13 +65,21 @@ export function eachDate(from: string, to: string): string[] {
   return out;
 }
 
-/** "1.790" + "000 VND" -> 1790000 */
+/**
+ * "1.790.000 VND", "1,790,000 VND", "VND 1.790.000", "1.790.000 ₫" -> 1790000.
+ * Dấu phân cách và vị trí đơn vị đổi theo locale mà trang tự chọn, nên đừng khoá
+ * vào đúng một dạng: đọc chệch một dạng là cả lượt quét thành "không thấy vé nào"
+ * mà không có lỗi nào để lần.
+ */
 function pricesIn(text: string): number[] {
   const out: number[] = [];
-  for (const m of text.matchAll(/([\d.]+)\s*[\n\s]*000\s*VND/g)) {
-    const n = Number(m[1].replace(/\./g, ""));
-    if (Number.isFinite(n) && n > 0) out.push(n * 1000);
-  }
+  const add = (raw: string) => {
+    const n = Number(raw.replace(/[.,\s]/g, ""));
+    // Vé nội địa rẻ nhất cũng vài trăm nghìn; ngưỡng này loại số lẻ trong text.
+    if (Number.isFinite(n) && n >= 10_000) out.push(n);
+  };
+  for (const m of text.matchAll(/(\d[\d.,\s]{3,})(?:VND|₫)/gi)) add(m[1]);
+  for (const m of text.matchAll(/(?:VND|₫)\s*(\d[\d.,]{3,})/gi)) add(m[1]);
   return out;
 }
 
@@ -494,7 +502,13 @@ export async function searchLeg(
   // Mốc thời gian từng bước đi kèm mọi lỗi/dừng sớm, để biết bước nào ăn hết giờ.
   const t0 = Date.now();
   const marks: string[] = [];
-  const mark = (name: string) => marks.push(`${name} ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+  const mark = (name: string) => {
+    const at = `${name} ${((Date.now() - t0) / 1000).toFixed(1)}s`;
+    marks.push(at);
+    // Lượt quét kéo dài vài phút; `VJ_TRACE=1` cho thấy nó đang ở bước nào thay vì
+    // phải chờ tới lúc kết thúc mới biết.
+    if (process.env.VJ_TRACE) console.log(`[vietjet] ${origin}→${dest} · ${at}`);
+  };
   const outOfTime = () => deadline !== undefined && Date.now() >= deadline;
 
   try {
@@ -587,18 +601,36 @@ export async function searchLeg(
       else fares.push({ date, price: strip, flightNo: null, depTime: null, arrTime: null });
     }
 
-    const cheapestSeen = lowest.size ? Math.min(...lowest.values()) : null;
+    // Không đọc được giá nào là hỏng, không phải "hết vé": báo lỗi kèm đúng nội
+    // dung trang đang hiện, vì đây là chỗ duy nhất biết được trang trả về cái gì.
+    if (!lowest.size && outOfTime()) {
+      throw new Error(`Hết giờ khi quét ${origin}→${dest} — ${marks.join(" · ")}`);
+    }
+    if (!lowest.size) {
+      const seen = await page
+        .evaluate(() => {
+          const nodes = [...document.querySelectorAll(".slick-slide[data-index]")];
+          return {
+            chips: nodes.length,
+            sample: nodes
+              .slice(0, 3)
+              .map((el) => ((el as HTMLElement).innerText || "").replace(/\s+/g, " ").trim()),
+            url: location.href,
+            body: (document.body?.innerText || "").replace(/\s+/g, " ").slice(0, 300),
+          };
+        })
+        .catch(() => null);
+      throw new Error(
+        `Không đọc được giá nào cho ${origin}→${dest} — ${JSON.stringify(seen)}\n[mốc] ${marks.join(" · ")}`,
+      );
+    }
+
+    const cheapestSeen = Math.min(...lowest.values());
     mark("xong");
     console.log(
       `[vietjet] ${origin}→${dest}: ${marks.join(" · ")} · dải ngày ${lowest.size} ngày` +
         `${cheapestSeen ? `, thấp nhất ${cheapestSeen.toLocaleString("vi-VN")}` : ""}`,
     );
-
-    // Hết giờ mà chưa đọc được gì thì đừng báo "quét 0 vé" như thể không có chuyến
-    // nào — nói thẳng là hết giờ, kèm bước nào ăn bao lâu.
-    if (!lowest.size && outOfTime()) {
-      throw new Error(`Hết giờ khi quét ${origin}→${dest} — ${marks.join(" · ")}`);
-    }
 
     return { fares, datesSeen: lowest.size, cheapestSeen };
   } catch (err) {
