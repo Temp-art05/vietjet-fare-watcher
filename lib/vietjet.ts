@@ -192,7 +192,10 @@ async function selectStripDate(page: Page, today: string, date: string) {
   const chip = page.locator(`.slick-slide[data-index="${offset}"]`).first();
   if (!(await chip.count())) return false;
   await chip.click({ timeout: 10000, force: true }).catch(() => {});
-  await page.waitForTimeout(6000);
+  // Đổi ngày là một lượt gọi API; chờ mạng lắng rồi chờ thêm một nhịp cho React
+  // render, thay vì đặt cứng 6s cho mọi trường hợp.
+  await page.waitForLoadState("networkidle", { timeout: 8000 }).catch(() => {});
+  await page.waitForTimeout(1500);
   return true;
 }
 
@@ -465,12 +468,23 @@ async function pageSnapshot(page: Page) {
  * range that has flights. Only dates whose strip price passes `priceCeiling`
  * get a detail fetch, which keeps a wide range cheap to scan.
  */
-export async function searchLeg(params: SearchParams, priceCeiling = Infinity): Promise<Fare[]> {
+export async function searchLeg(
+  params: SearchParams,
+  priceCeiling = Infinity,
+  deadline?: number,
+): Promise<Fare[]> {
   const { origin, dest, from, to } = params;
   const profile = PROFILES[Math.floor(Math.random() * PROFILES.length)];
   // Session bị bỏ đi ở `finally` bên dưới nên không có gì theo sang lượt sau.
   const session = await openSession(profile);
   const page = session.page;
+
+  // Serverless chém function khi hết giờ, và bị chém thì không còn gì kể lại.
+  // Mốc thời gian từng bước đi kèm mọi lỗi/dừng sớm, để biết bước nào ăn hết giờ.
+  const t0 = Date.now();
+  const marks: string[] = [];
+  const mark = (name: string) => marks.push(`${name} ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+  const outOfTime = () => deadline !== undefined && Date.now() >= deadline;
 
   try {
     await page.goto(HOME, { waitUntil: "domcontentloaded", timeout: 90_000 });
@@ -494,12 +508,15 @@ export async function searchLeg(params: SearchParams, priceCeiling = Infinity): 
       await page.reload({ waitUntil: "domcontentloaded", timeout: 90_000 });
     }
 
+    mark("trang chủ");
+
     await page.waitForTimeout(1000);
     await oneway.click({ force: true });
     await page.waitForTimeout(500);
 
     await fillPlace(page, "origin", origin);
     await fillPlace(page, "dest", dest);
+    mark("điểm đi/đến");
 
     if (!(await page.locator(".rdrCalendarWrapper").first().isVisible().catch(() => false))) {
       await page.getByText("Ngày đi", { exact: true }).first().click().catch(() => {});
@@ -507,12 +524,23 @@ export async function searchLeg(params: SearchParams, priceCeiling = Infinity): 
     }
     await pickDate(page, from);
     await page.waitForTimeout(1200);
+    mark("chọn ngày");
 
     // The hero widget gets covered by the passenger panel that opens after the
     // date pick; the sticky bottom bar carries the same controls unobstructed.
     await page.getByRole("button", { name: "Tìm chuyến bay" }).last().click({ timeout: 20_000 });
     await page.waitForURL(/select-flight/, { timeout: 60_000 });
-    await page.waitForTimeout(15_000);
+
+    // Trang kết quả render dần: chờ tới lúc thật sự có giá trên dải ngày, thay vì
+    // đặt cứng 15s — trang trả nhanh thì tiết kiệm được cả chục giây, mà trả chậm
+    // cũng không hụt.
+    await page
+      .getByText(/000\s*VND/)
+      .first()
+      .waitFor({ state: "visible", timeout: 45_000 })
+      .catch(() => {});
+    await page.waitForTimeout(2000);
+    mark("trang kết quả");
 
     const today = await page.evaluate(() => {
       const d = new Date();
@@ -527,13 +555,16 @@ export async function searchLeg(params: SearchParams, priceCeiling = Infinity): 
     // Each load prices ~5 days around the selected one, so step through the
     // range in chunks instead of one page load per date.
     for (let i = 0; i < wanted.length; i += 5) {
+      if (outOfTime()) break;
       if (i > 0 && !(await selectStripDate(page, today, wanted[i]))) break;
       for (const [d, p] of await readStrip(page, today)) {
         if (!lowest.has(d) || p < lowest.get(d)!) lowest.set(d, p);
       }
     }
+    mark("dải giá");
 
     for (const date of wanted) {
+      if (outOfTime()) break;
       const strip = lowest.get(date);
       if (strip === undefined || strip > priceCeiling) continue;
       if (detailed.has(date)) continue;
@@ -545,15 +576,26 @@ export async function searchLeg(params: SearchParams, priceCeiling = Infinity): 
       else fares.push({ date, price: strip, flightNo: null, depTime: null, arrTime: null });
     }
 
+    mark("xong");
+    console.log(`[vietjet] ${origin}→${dest}: ${marks.join(" · ")}`);
+
+    // Hết giờ mà chưa kịp đọc gì thì đừng báo "quét 0 vé" như thể không có chuyến
+    // nào — nói thẳng là hết giờ, kèm bước nào ăn bao lâu.
+    if (!fares.length && outOfTime()) {
+      throw new Error(`Hết giờ khi quét ${origin}→${dest} — ${marks.join(" · ")}`);
+    }
+
     return fares;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    if (looksLikeCrash(err)) throw new Error(`${msg}\n[chẩn đoán] ${await crashNotes()}`);
+    mark("lỗi");
+    const timing = `\n[mốc] ${marks.join(" · ")}`;
+    if (looksLikeCrash(err)) throw new Error(`${msg}\n[chẩn đoán] ${await crashNotes()}${timing}`);
     if (/timeout/i.test(msg)) {
       const snap = await pageSnapshot(page);
-      if (snap) throw new Error(`${msg}\n[trang lúc lỗi] ${snap}`);
+      if (snap) throw new Error(`${msg}\n[trang lúc lỗi] ${snap}${timing}`);
     }
-    throw err;
+    throw new Error(`${msg}${timing}`);
   } finally {
     await session.close();
   }

@@ -97,13 +97,14 @@ function buildCandidates(config: WatchConfig, out: Fare[], ret: Fare[]): Candida
   return candidates;
 }
 
-export async function runConfig(config: WatchConfig): Promise<RunResult> {
+export async function runConfig(config: WatchConfig, deadline?: number): Promise<RunResult> {
   const result: RunResult = { configId: config.id, scanned: 0, matched: 0, notified: 0 };
 
   try {
     const outbound = await searchLeg(
       { origin: config.origin, dest: config.dest, from: config.departFrom, to: config.departTo },
       config.maxPrice,
+      deadline,
     );
 
     let inbound: Fare[] = [];
@@ -111,9 +112,15 @@ export async function runConfig(config: WatchConfig): Promise<RunResult> {
       if (!config.returnFrom || !config.returnTo) {
         throw new Error("Config khứ hồi nhưng thiếu khoảng ngày về");
       }
+      // Khứ hồi cần cả hai chiều mới so được tổng, nên hết giờ ở đây là nói thẳng
+      // chứ đừng kết luận "không có vé nào khớp".
+      if (deadline && Date.now() >= deadline) {
+        throw new Error("Hết giờ sau khi quét chiều đi, chưa kịp quét chiều về");
+      }
       inbound = await searchLeg(
         { origin: config.dest, dest: config.origin, from: config.returnFrom, to: config.returnTo },
         config.maxPrice,
+        deadline,
       );
     }
     result.scanned = outbound.length + inbound.length;
@@ -172,7 +179,7 @@ async function runSequentially(configs: WatchConfig[], deadline?: number): Promi
       break;
     }
     console.log(`[runner] ${config.name} (${config.origin}→${config.dest})`);
-    const r = await runConfig(config);
+    const r = await runConfig(config, deadline);
     console.log(
       r.error
         ? `[runner] ${config.name} lỗi: ${r.error}`
