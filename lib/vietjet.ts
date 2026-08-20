@@ -129,13 +129,29 @@ async function pickDate(page: Page, date: string) {
   throw new Error(`Không mở được tháng cho ngày ${date}`);
 }
 
+/**
+ * Ô điểm đi không có id, name, placeholder hay aria nào để bám (đã kiểm bằng cách
+ * dump toàn bộ `<input>` của trang chủ). Thứ duy nhất chắc chắn: nó là ô đứng ngay
+ * trước ô điểm đến `#arrivalPlaceDesktop` trong cùng widget — mà widget lại xuất
+ * hiện hai lần (hero + thanh dính dưới). Bám theo `.first()` là bám vị trí: trang
+ * render lệch một nhịp là gõ vào ô khác, và lỗi hiện ra chỉ là "ô đang là rỗng".
+ * Nên gắn nhãn theo danh tính, chỉ trong nhóm ô đang thật sự hiện.
+ */
+async function tagPlaceInputs(page: Page) {
+  return page.evaluate(() => {
+    const shown = [...document.querySelectorAll("input.MuiOutlinedInput-input")].filter(
+      (el) => (el as HTMLElement).offsetParent !== null,
+    );
+    const arrival = shown.findIndex((el) => el.id === "arrivalPlaceDesktop");
+    if (arrival < 1) return false;
+    shown[arrival - 1].setAttribute("data-vj", "origin");
+    shown[arrival].setAttribute("data-vj", "dest");
+    return true;
+  });
+}
+
 async function fillPlace(page: Page, which: "origin" | "dest", iata: string) {
-  // The departure input has no id; the arrival one is #arrivalPlaceDesktop.
-  // Both appear twice (hero widget + sticky bottom bar) so always scope to .first().
-  const input =
-    which === "dest"
-      ? page.locator("#arrivalPlaceDesktop").first()
-      : page.locator("input.MuiOutlinedInput-input").first();
+  const input = page.locator(`input[data-vj="${which}"]`).first();
   const airportRow = page.getByText(new RegExp(`^\\s*${iata}\\s*$`)).first();
   const field = which === "dest" ? "điểm đến" : "điểm đi";
 
@@ -143,6 +159,11 @@ async function fillPlace(page: Page, which: "origin" | "dest", iata: string) {
   // thay vì để nó hỏng tiếp ở bước sau: chọn không xong thì panel ngày không mở,
   // và lỗi hiện ra lại là "không tìm thấy nút sang tháng trong lịch".
   for (let attempt = 0; attempt < 2; attempt++) {
+    // Gắn lại mỗi lượt: React render lại là attribute bay mất.
+    if (!(await tagPlaceInputs(page))) {
+      throw new Error(`Không thấy ô nhập ${field} trên trang — ${await pageSnapshot(page)}`);
+    }
+
     // Trang hay có panel mở ra đè lên ô nhập; lúc đó click thường không tới được
     // element, phải bắn thẳng vào toạ độ của nó.
     await input.click({ timeout: 8000 }).catch(() => input.click({ force: true, timeout: 8000 }));
