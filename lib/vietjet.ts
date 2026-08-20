@@ -262,6 +262,12 @@ async function launchOptions(): Promise<LaunchOptions> {
 
   const args = chromiumPack.args.filter((a) => !INCOMPATIBLE.some((bad) => a.startsWith(bad)));
 
+  // Disk cache của chromium ghi thẳng vào `/tmp`, mà `/tmp` chỉ có 512MB và bản
+  // Chromium giải nén đã ăn ~250MB trong đó. Hết chỗ ghi là chromium sập giữa
+  // lúc load trang. Cờ đặt sau thắng cờ đặt trước, nên 32MB mà
+  // @sparticuz/chromium khuyến nghị bị ghi đè xuống mức gần như không.
+  args.push("--disk-cache-size=1", "--media-cache-size=1");
+
   return {
     headless: true,
     executablePath: await chromiumPack.executablePath(),
@@ -288,19 +294,31 @@ export async function closeBrowser() {
 
 const PROFILE_PREFIX = "vj-profile-";
 
+/** Rác của những lượt quét trước; bản Chromium giải nén không khớp mẫu nào ở đây. */
+const TMP_JUNK = [/^vj-profile-/, /^playwright/, /^chromium-crashpad/, /^\.com\.google\.Chrome/, /\.dmp$/];
+
+async function tmpFreeBytes() {
+  const info = await statfs(tmpdir()).catch(() => null);
+  return info ? Number(info.bfree) * Number(info.bsize) : Number.POSITIVE_INFINITY;
+}
+
 /**
- * Invocation bị chém giữa đường để lại nguyên thư mục profile trong `/tmp`, mà
- * `/tmp` trên serverless chỉ có 512MB và đã mất một phần cho Chromium giải nén.
- * Dồn vài lượt là hết chỗ ghi và chromium crash vì lý do khác hẳn. Chỉ xoá thư
- * mục cũ hơn 5 phút, để không phá invocation đang chạy song song cùng instance.
+ * Invocation bị chém giữa đường để lại nguyên thư mục profile trong `/tmp`, cộng
+ * minidump mỗi lần chromium sập. `/tmp` chỉ 512MB và Chromium giải nén đã chiếm
+ * ~250MB, nên dồn vài lượt là hết chỗ ghi — chính là lỗi đã gặp trên production.
+ *
+ * Bình thường chỉ xoá thứ cũ hơn 5 phút, để không phá invocation đang chạy song
+ * song trên cùng instance. Nhưng khi `/tmp` đã sát đáy thì lượt này gần như chắc
+ * chắn sập, lúc đó dọn cả rác vừa sinh vẫn hơn.
  */
 async function sweepTmp() {
   const root = tmpdir();
-  const cutoff = Date.now() - 5 * 60_000;
+  const tight = (await tmpFreeBytes()) < 150 * 1024 * 1024;
+  const cutoff = Date.now() - (tight ? 30_000 : 5 * 60_000);
   const names = await readdir(root).catch(() => [] as string[]);
   await Promise.all(
     names
-      .filter((n) => n.startsWith(PROFILE_PREFIX) || n.startsWith("playwright"))
+      .filter((n) => TMP_JUNK.some((junk) => junk.test(n)))
       .map(async (name) => {
         const path = join(root, name);
         const info = await stat(path).catch(() => null);
@@ -340,6 +358,15 @@ async function openSession(profile: (typeof PROFILES)[number]): Promise<Session>
   await sweepTmp();
   const dir = await mkdtemp(join(tmpdir(), PROFILE_PREFIX));
   const ctx = await chromium.launchPersistentContext(dir, { ...(await launchOptions()), ...asGuest });
+  // Ảnh, video và font không giúp gì cho việc đọc giá, mà chúng là phần lớn thứ
+  // chromium ghi vào cache và giữ trong RAM. CSS thì vẫn để, vì layout còn quyết
+  // định element nào "hiện" khi code đi tìm.
+  await ctx.route("**/*", (route) => {
+    const type = route.request().resourceType();
+    if (type === "image" || type === "media" || type === "font") return route.abort();
+    return route.continue();
+  });
+
   const page = ctx.pages()[0] ?? (await ctx.newPage());
   return {
     page,
@@ -351,6 +378,16 @@ async function openSession(profile: (typeof PROFILES)[number]): Promise<Session>
 }
 
 const mb = (bytes: number) => Math.round(bytes / 1_048_576);
+
+/** Dung lượng thật của một entry trong `/tmp`, kể cả khi nó là thư mục. */
+async function entrySize(path: string): Promise<number> {
+  const info = await stat(path).catch(() => null);
+  if (!info) return 0;
+  if (!info.isDirectory()) return info.size;
+  const names = await readdir(path).catch(() => [] as string[]);
+  const sizes = await Promise.all(names.map((name) => entrySize(join(path, name))));
+  return sizes.reduce((a, b) => a + b, 0);
+}
 
 function looksLikeCrash(err: unknown) {
   const msg = err instanceof Error ? err.message : String(err);
@@ -367,9 +404,22 @@ async function crashNotes() {
     `RAM đã dùng ${mb(totalmem() - freemem())}/${mb(totalmem())}MB`,
     `RSS ${mb(process.memoryUsage().rss)}MB`,
   ];
-  const fs = await statfs(tmpdir()).catch(() => null);
-  if (fs) notes.push(`/tmp còn ${mb(Number(fs.bfree) * Number(fs.bsize))}MB`);
+  notes.push(`/tmp còn ${mb(await tmpFreeBytes())}MB`);
   notes.push(`graphics ${graphicsOn() ? "on" : "off"}`);
+
+  // Ai đang ăn hết `/tmp` — không có dòng này thì chỉ biết là hết chỗ, không biết
+  // vì cái gì.
+  const root = tmpdir();
+  const names = await readdir(root).catch(() => [] as string[]);
+  const sized = await Promise.all(
+    names.map(async (name) => ({ name, size: await entrySize(join(root, name)) })),
+  );
+  const biggest = sized
+    .sort((a, b) => b.size - a.size)
+    .slice(0, 4)
+    .map((e) => `${e.name} ${mb(e.size)}MB`);
+  if (biggest.length) notes.push(`/tmp: ${biggest.join(" · ")}`);
+
   return notes.join(", ");
 }
 
