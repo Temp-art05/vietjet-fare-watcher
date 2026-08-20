@@ -127,22 +127,34 @@ function blobDriver(): Driver {
     name: `blob:${pathname}`,
     async load() {
       const { get } = await import("@vercel/blob");
-      // `useCache: false` vì blob nằm sau CDN: vừa ghi xong mà đọc bản cache thì
-      // lượt sửa kế tiếp sẽ dựng trên dữ liệu cũ và xoá mất thay đổi vừa rồi.
-      const res = await get(pathname, { access: "public", useCache: false, token });
+      // Phải là `private`, không phải vì bí mật mà vì tính đúng đắn: `useCache:
+      // false` chỉ thật sự bỏ cache khi access là private — xem
+      // `@vercel/blob/dist/index.js:146`, blob public đi qua CDN và cờ đó bị bỏ
+      // qua. Để public thì ghi xong đọc lại vẫn ra bản cũ, lượt ghi kế tiếp dựng
+      // trên dữ liệu cũ và xoá mất thay đổi vừa rồi. Kèm theo, private đóng luôn
+      // chuyện ai biết URL là đọc được cả webhook Discord trong file.
+      const res = await get(pathname, { access: "private", useCache: false, token });
       // `get` trả null đúng khi chưa có file. Mọi lỗi khác (token sai, store bị
       // xoá…) phải ném lên — nuốt nó thành "chưa có gì" là ghi đè sạch dữ liệu.
-      if (!res?.stream) return null;
-      return new Response(res.stream).text();
+      if (res?.stream) return new Response(res.stream).text();
+
+      // Bản deploy trước cất blob ở chế độ public, và private/public là hai URL
+      // khác nhau nên lượt đọc trên không thấy nó. Đọc nốt một lần để không mất
+      // dữ liệu cũ; lượt ghi kế tiếp tự chuyển pathname đó sang private.
+      const legacy = await get(pathname, { access: "public", useCache: false, token });
+      if (!legacy?.stream) return null;
+      return new Response(legacy.stream).text();
     },
     async save(text) {
       const { put } = await import("@vercel/blob");
       await put(pathname, text, {
-        access: "public",
+        access: "private",
         token,
         contentType: "application/json",
         addRandomSuffix: false,
         allowOverwrite: true,
+        // Ghi xong là phải đọc được ngay; đừng để tầng cache nào giữ bản cũ.
+        cacheControlMaxAge: 0,
       });
     },
   };

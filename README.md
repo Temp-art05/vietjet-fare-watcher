@@ -62,7 +62,7 @@ Chạy được cả bộ, kể cả phần scrape. Ba thứ đã được chu�
 
 Thiếu bước này thì app rơi về ghi file trên ổ đĩa, mà ổ đĩa serverless chỉ đọc — mọi thao tác lưu sẽ trả 500 kèm thông báo nhắc đúng việc phải làm.
 
-Đặt thêm `BLOB_PATH` là một chuỗi ngẫu nhiên khó đoán — blob là public, ai biết URL là đọc được cả webhook Discord trong file.
+Blob được ghi ở chế độ **private**: đọc phải có token, nên webhook Discord trong file không lộ ra ngoài. Đây cũng là điều kiện để dữ liệu đúng — `useCache: false` của `@vercel/blob` chỉ thật sự bỏ cache với blob private (`dist/index.js:146`), còn blob public đi qua CDN nên ghi xong đọc lại vẫn ra bản cũ, và lượt ghi kế tiếp dựng trên bản cũ đó sẽ xoá mất thay đổi vừa rồi. `BLOB_PATH` chỉ còn là chuyện đặt tên, không phải chỗ dựa bảo mật.
 
 **2. Chromium.** Ổ đĩa serverless không có browser, nên `lib/vietjet.ts` tự đổi cách khởi động khi thấy biến `VERCEL`: giải nén Chromium từ `@sparticuz/chromium` thay vì dùng bản `playwright install` tải về.
 
