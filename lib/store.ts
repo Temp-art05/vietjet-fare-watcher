@@ -151,7 +151,10 @@ function blobDriver(): Driver {
       const urls = [meta.url, meta.downloadUrl];
       let text: string | null = null;
 
-      for (let attempt = 0; attempt < 4; attempt++) {
+      // Cửa sổ CDN còn giữ bản cũ thường chỉ vài trăm ms, nên chờ tăng dần rồi thử
+      // lại vẫn rẻ hơn nhiều so với việc trả về dữ liệu cũ.
+      for (let attempt = 0; attempt < 6; attempt++) {
+        if (attempt > 0) await new Promise((r) => setTimeout(r, 100 * 2 ** (attempt - 1)));
         const res = await fetch(urls[attempt % urls.length], { cache: "no-store" });
         if (res.status === 404) return null;
         if (!res.ok) continue;
