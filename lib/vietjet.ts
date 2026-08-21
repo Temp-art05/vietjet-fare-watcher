@@ -193,11 +193,24 @@ async function pickDate(page: Page, date: string) {
  */
 async function tagPlaceInputs(page: Page) {
   return page.evaluate(() => {
+    window.scrollTo(0, 0);
     const shown = [...document.querySelectorAll("input.MuiOutlinedInput-input")].filter(
       (el) => (el as HTMLElement).offsetParent !== null,
     );
-    const arrival = shown.findIndex((el) => el.id === "arrivalPlaceDesktop");
+    // Widget xuất hiện hai lần (hero + thanh dính dưới) và cả hai đều có thể "hiện".
+    // Lấy bản hero: ô điểm đến nằm cao nhất trên trang sau khi đã cuộn lên đầu.
+    let arrival = -1;
+    let highest = Number.POSITIVE_INFINITY;
+    shown.forEach((el, i) => {
+      if (el.id !== "arrivalPlaceDesktop") return;
+      const top = el.getBoundingClientRect().top;
+      if (top < highest) {
+        highest = top;
+        arrival = i;
+      }
+    });
     if (arrival < 1) return false;
+    for (const el of document.querySelectorAll("[data-vj]")) el.removeAttribute("data-vj");
     shown[arrival - 1].setAttribute("data-vj", "origin");
     shown[arrival].setAttribute("data-vj", "dest");
     return true;
@@ -223,15 +236,19 @@ async function fillPlace(page: Page, which: "origin" | "dest", iata: string) {
     await input.click({ timeout: 8000 }).catch(() => input.click({ force: true, timeout: 8000 }));
     await page.waitForTimeout(400);
 
-    // `fill()` set giá trị một nhịp, còn ô này chỉ gọi API gợi ý khi thấy từng ký
-    // tự — phải gõ thật.
-    await input.fill("");
-    await input.pressSequentially(iata, { delay: 120 });
+    // Click có thể "thành công" mà focus vẫn ở chỗ khác (panel vừa mở chen vào);
+    // lúc đó gõ bao nhiêu cũng không vào ô.
+    await input.focus().catch(() => {});
 
-    // Trang chủ hydrate xong mới nhận input; gõ sớm thì React render lại là mất
-    // sạch. Ký tự chưa vào ô thì chờ gợi ý cũng vô nghĩa — thử lại luôn.
+    // `fill()` set thẳng giá trị nên chắc chắn vào ô, nhưng ô này chỉ gọi API gợi ý
+    // khi thấy phím thật — nên set phần đầu rồi gõ ký tự cuối.
+    await input.fill(iata.slice(0, -1));
+    await input.pressSequentially(iata.slice(-1), { delay: 150 });
+
+    // Chưa vào ô nghĩa là trang vẫn chưa nhận input (hydrate chậm, hoặc panel đè):
+    // chờ gợi ý lúc này là vô nghĩa, thử lại luôn.
     if (!(await input.inputValue().catch(() => "")).toUpperCase().includes(iata.toUpperCase())) {
-      await page.waitForTimeout(1500);
+      await page.waitForTimeout(2000);
       continue;
     }
 
@@ -711,8 +728,19 @@ export async function searchLeg(
 
     mark("trang chủ");
 
-    await page.waitForTimeout(1000);
-    await oneway.click({ force: true });
+    // Element xuất hiện KHÁC với trang đã hydrate. Bấm radio "một chiều" cho tới
+    // khi nó thật sự được chọn: đó là bằng chứng React đã gắn handler và trang nhận
+    // tương tác. Không có mốc này thì mấy bước sau gõ vào ô nhập rồi mất sạch, và
+    // lỗi hiện ra chỉ là "ô đang rỗng".
+    for (let attempt = 0; attempt < 6; attempt++) {
+      await oneway.click({ force: true }).catch(() => {});
+      if (await oneway.isChecked().catch(() => false)) break;
+      await page.waitForTimeout(1500);
+      if (attempt === 5) {
+        throw new Error(`Trang chủ không nhận tương tác (radio một chiều không chọn được) — ${await pageSnapshot(page)}`);
+      }
+    }
+    mark("hydrate");
     await page.waitForTimeout(500);
 
     await fillPlace(page, "origin", origin);
