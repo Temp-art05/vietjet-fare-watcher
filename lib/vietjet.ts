@@ -1,7 +1,7 @@
 import { mkdtemp, readdir, rm, stat, statfs } from "node:fs/promises";
 import { freemem, tmpdir, totalmem } from "node:os";
 import { join } from "node:path";
-import { chromium, type Browser, type LaunchOptions, type Page } from "playwright-core";
+import { chromium, type Browser, type BrowserContext, type LaunchOptions, type Page } from "playwright-core";
 import { rateToVnd } from "./fx";
 
 export type Fare = {
@@ -268,7 +268,7 @@ async function fillPlace(page: Page, which: "origin" | "dest", iata: string) {
     // Chưa vào ô nghĩa là trang vẫn chưa nhận input (hydrate chậm, hoặc panel đè):
     // chờ gợi ý lúc này là vô nghĩa, thử lại luôn.
     if (!(await input.inputValue().catch(() => "")).toUpperCase().includes(iata.toUpperCase())) {
-      await page.waitForTimeout(2000);
+      await page.waitForTimeout(3000);
       continue;
     }
 
@@ -407,6 +407,10 @@ const STEALTH_ARG = "--disable-blink-features=AutomationControlled";
  */
 const INCOMPATIBLE = ["--headless"];
 
+/** Quảng cáo, analytics, retargeting — không thứ nào cần cho việc đọc giá. */
+const JUNK_HOSTS =
+  /(^|\.)(doubleclick\.net|googletagmanager\.com|google-analytics\.com|googleadservices\.com|googlesyndication\.com|facebook\.net|facebook\.com|tiktok\.com|ttlivecdn\.com|twitter\.com|t\.co|criteo\.com|criteo\.net|bing\.com|clarity\.ms|snapchat\.com|sc-static\.net|adbro\.me|creativecdn\.com|tapad\.com|appier\.com|appier\.net|hotjar\.com|hotjar\.io|yandex\.ru|taboola\.com|outbrain\.com|zaloapp\.com|insider\.com)$/i;
+
 const isServerless = () => Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
 
 /**
@@ -536,6 +540,26 @@ async function sweepTmp() {
 type Session = { page: Page; close: () => Promise<void>; net: () => string };
 
 /**
+ * Chặn video: nặng nhất mà không ảnh hưởng layout. Ảnh và font thì phải để — chặn
+ * hai thứ đó, trang co lại khác hẳn và accordion trong trang đè lên đúng ô nhập
+ * điểm đến, click không tới được.
+ *
+ * Chặn luôn quảng cáo và tracker: một lượt tải trang gọi ~200 request, phần lớn là
+ * mấy thứ đó, và chúng ăn đúng thứ serverless đang thiếu — CPU. Trang hydrate chậm
+ * thì click với gõ đều rơi vào khoảng trắng. Không chạm vietjetair.com, reCAPTCHA
+ * hay AWS WAF: đó là phần trang thật sự cần.
+ *
+ * Đặt cho **cả local lẫn serverless**: hai bên chạy khác nhau thì local không còn
+ * phản chiếu production, và bài học vụ chặn ảnh là đúng chỗ đó.
+ */
+async function blockNoise(ctx: BrowserContext) {
+  await ctx.route("**/*", (route) => {
+    if (route.request().resourceType() === "media") return route.abort();
+    return JUNK_HOSTS.test(new URL(route.request().url()).hostname) ? route.abort() : route.continue();
+  });
+}
+
+/**
  * Trang có thể render đủ khung mà không có giá nào, vì lời gọi API giá bị chặn
  * (WAF/reCAPTCHA soi IP datacenter) chứ không phải vì hết vé. Nhìn từ DOM thì hai
  * chuyện đó giống nhau, nên phải nghe thẳng tầng mạng.
@@ -580,6 +604,7 @@ async function openSession(profile: (typeof PROFILES)[number]): Promise<Session>
     const browser = await getBrowser();
     const ctx = await browser.newContext({ ...asGuest, storageState: undefined });
     await ctx.clearCookies();
+    await blockNoise(ctx);
     const page = await ctx.newPage();
     return { page, close: () => ctx.close().catch(() => {}), net: watchNetwork(page) };
   }
@@ -590,13 +615,7 @@ async function openSession(profile: (typeof PROFILES)[number]): Promise<Session>
   await sweepTmp();
   const dir = await mkdtemp(join(tmpdir(), PROFILE_PREFIX));
   const ctx = await chromium.launchPersistentContext(dir, { ...(await launchOptions()), ...asGuest });
-  // Chỉ chặn video: nó nặng nhất mà không ảnh hưởng layout. Ảnh và font thì phải
-  // để — chặn hai thứ đó, trang co lại khác hẳn local và accordion trong trang
-  // đè lên đúng ô nhập điểm đến, click không tới được.
-  await ctx.route("**/*", (route) =>
-    route.request().resourceType() === "media" ? route.abort() : route.continue(),
-  );
-
+  await blockNoise(ctx);
   const page = ctx.pages()[0] ?? (await ctx.newPage());
   return {
     page,
@@ -748,6 +767,8 @@ export async function searchLeg(
 
     mark("trang chủ");
 
+    await tagOneWay(page);
+
     // Element xuất hiện KHÁC với trang đã hydrate xong. Bấm radio "một chiều" tới
     // khi nó báo đã chọn: đó là bằng chứng React đã gắn handler, và chờ ở đây thì
     // mấy bước sau không gõ vào một ô chưa sống.
@@ -756,16 +777,15 @@ export async function searchLeg(
     // tác mà `checked` vẫn không phản ánh (mình đọc nhầm bản radio, hay MUI giữ state
     // ở chỗ khác). Hết lượt chờ thì đi tiếp — chỗ kiểm thật là `fillPlace`, nó tự
     // xác nhận giá trị đã vào ô.
+    // Container serverless CPU yếu hơn máy local nhiều, mà trang này hydrate nặng:
+    // đo được trang chủ 18.5s ở Vercel so với 10.7s ở local. Nên chờ tới ~45s thay
+    // vì 10s — vẫn nằm trong deadline, mà bỏ cuộc sớm thì cả lượt quét thành rác.
     let interactive = false;
-    for (let attempt = 0; attempt < 5 && !interactive; attempt++) {
-      const checked = await tagOneWay(page);
-      if (checked) {
-        interactive = true;
-        break;
-      }
-      await page.locator('input[data-vj-oneway="1"]').first().click({ force: true, timeout: 8000 }).catch(() => {});
-      await page.waitForTimeout(1200);
+    for (let attempt = 0; attempt < 20 && !interactive; attempt++) {
+      if (attempt > 0) await page.waitForTimeout(2000);
+      await page.locator('input[data-vj-oneway="1"]').first().click({ force: true, timeout: 5000 }).catch(() => {});
       interactive = (await tagOneWay(page)) === true;
+      if (outOfTime()) break;
     }
     mark(interactive ? "hydrate" : "hydrate?");
     await page.waitForTimeout(500);
