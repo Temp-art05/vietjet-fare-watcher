@@ -2,6 +2,7 @@ import { mkdtemp, readdir, rm, stat, statfs } from "node:fs/promises";
 import { freemem, tmpdir, totalmem } from "node:os";
 import { join } from "node:path";
 import { chromium, type Browser, type LaunchOptions, type Page } from "playwright-core";
+import { rateToVnd } from "./fx";
 
 export type Fare = {
   date: string; // YYYY-MM-DD
@@ -9,6 +10,11 @@ export type Fare = {
   flightNo: string | null;
   depTime: string | null;
   arrTime: string | null;
+  /**
+   * Chỉ có khi trang trả tiền tệ khác VND (IP ngoài Việt Nam): giá gốc và tỷ giá
+   * đã dùng. Giá VND ở trên là số quy đổi, và mọi chỗ hiển thị phải nói ra điều đó.
+   */
+  converted?: { amount: number; currency: string; rate: number };
 };
 
 export type SearchParams = {
@@ -65,22 +71,70 @@ export function eachDate(from: string, to: string): string[] {
   return out;
 }
 
+/** Số tiền đọc được từ text của trang, chưa quy đổi. */
+export type Money = { amount: number; currency: string };
+
+/** Hàm quy về VND; trả null khi không quy đổi được, để chỗ gọi bỏ qua thay vì báo sai. */
+type ToVnd = (m: Money) => number | null;
+
+const CURRENCIES = "VND|USD|EUR|AUD|SGD|KRW|JPY|TWD|THB|CNY|HKD|MYR|INR|CAD|GBP";
+
 /**
- * "1.790.000 VND", "1,790,000 VND", "VND 1.790.000", "1.790.000 ₫" -> 1790000.
- * Dấu phân cách và vị trí đơn vị đổi theo locale mà trang tự chọn, nên đừng khoá
- * vào đúng một dạng: đọc chệch một dạng là cả lượt quét thành "không thấy vé nào"
- * mà không có lỗi nào để lần.
+ * "1.790.000 VND", "1,790,000 VND", "VND 1.790.000", "1.790.000 ₫", "34 USD",
+ * và cả "27 .55 USD" — trang tách phần xu ra element riêng nên `innerText` chèn
+ * khoảng trắng vào giữa. Dấu phân cách khác nhau theo tiền tệ nên chuẩn hoá riêng:
+ * VND không có phần thập phân, USD/EUR… thì có.
  */
-function pricesIn(text: string): number[] {
-  const out: number[] = [];
-  const add = (raw: string) => {
-    const n = Number(raw.replace(/[.,\s]/g, ""));
-    // Vé nội địa rẻ nhất cũng vài trăm nghìn; ngưỡng này loại số lẻ trong text.
-    if (Number.isFinite(n) && n >= 10_000) out.push(n);
+export function moneyIn(text: string): Money[] {
+  const out: Money[] = [];
+
+  const add = (raw: string, currency: string) => {
+    const code = currency.toUpperCase();
+    const cleaned = code === "VND" || code === "₫" ? raw.replace(/[.,\s]/g, "") : normaliseDecimal(raw);
+    const amount = Number(cleaned);
+    if (!Number.isFinite(amount)) return;
+    // Vé nội địa rẻ nhất cũng vài trăm nghìn VND, hay vài USD — ngưỡng này loại
+    // số lẻ lọt vào từ text xung quanh.
+    if (code === "VND" ? amount < 10_000 : amount < 1) return;
+    out.push({ amount, currency: code === "₫" ? "VND" : code });
   };
-  for (const m of text.matchAll(/(\d[\d.,\s]{3,})(?:VND|₫)/gi)) add(m[1]);
-  for (const m of text.matchAll(/(?:VND|₫)\s*(\d[\d.,]{3,})/gi)) add(m[1]);
+
+  // Chỉ cho đúng một khoảng trắng, và chỉ khi ngay sau nó là phần thập phân —
+  // "27 .55 USD" là thật (trang tách phần xu), còn nếu cho khoảng trắng tự do thì
+  // "17:35 690.000 VND" bị đọc thành 35.690.000.
+  for (const m of text.matchAll(new RegExp(`(\\d[\\d.,]*(?:\\s\\.\\d{1,2})?)\\s*(${CURRENCIES}|₫)`, "gi"))) {
+    add(m[1], m[2]);
+  }
+  if (out.length) return out;
+
+  // Dạng đơn vị đứng trước chỉ dùng khi dạng trên không thấy gì: hai giá cạnh nhau
+  // ("690.000 VND 1.010.000 VND") thì nó đọc lẫn sang số của giá sau.
+  for (const m of text.matchAll(new RegExp(`(${CURRENCIES}|₫)\\s*(\\d[\\d.,]*)`, "gi"))) {
+    add(m[2], m[1]);
+  }
   return out;
+}
+
+/** "27 .55" -> "27.55", "1,234.56" -> "1234.56", "1.234" -> "1234" (dấu . là phân
+ * cách nghìn khi không phải hai chữ số cuối). */
+function normaliseDecimal(raw: string): string {
+  const compact = raw.replace(/[\s,]/g, "");
+  const parts = compact.split(".");
+  if (parts.length === 1) return compact;
+  const last = parts.pop()!;
+  const head = parts.join("");
+  return last.length === 2 ? `${head}.${last}` : head + last;
+}
+
+/** Giá thấp nhất trong một đoạn text, đã quy về VND. */
+function lowestVnd(text: string, toVnd: ToVnd): { vnd: number; money: Money } | null {
+  let best: { vnd: number; money: Money } | null = null;
+  for (const money of moneyIn(text)) {
+    const vnd = toVnd(money);
+    if (vnd === null) continue;
+    if (!best || vnd < best.vnd) best = { vnd, money };
+  }
+  return best;
 }
 
 async function dismissOverlays(page: Page) {
@@ -211,7 +265,7 @@ async function fillPlace(page: Page, which: "origin" | "dest", iata: string) {
 }
 
 /** Reads every date chip in the slick carousel that currently has a price. */
-async function readStrip(page: Page, today: string): Promise<Map<string, number>> {
+async function readStrip(page: Page, today: string, toVnd: ToVnd): Promise<Map<string, number>> {
   const chips = await page.evaluate(() =>
     [...document.querySelectorAll(".slick-slide[data-index]")].map((el) => ({
       index: Number(el.getAttribute("data-index")),
@@ -231,8 +285,8 @@ async function readStrip(page: Page, today: string): Promise<Map<string, number>
     if (!label) continue;
     if (Number(label[1]) !== d.getDate() || Number(label[2]) !== d.getMonth() + 1) continue;
 
-    const prices = pricesIn(chip.text);
-    if (prices.length) out.set(iso(d), Math.min(...prices));
+    const best = lowestVnd(chip.text, toVnd);
+    if (best) out.set(iso(d), best.vnd);
   }
   return out;
 }
@@ -251,16 +305,24 @@ async function selectStripDate(page: Page, today: string, date: string) {
 }
 
 /** Parses the flight table currently rendered for the selected date. */
-async function readFlights(page: Page, date: string): Promise<Fare[]> {
-  const rows = await page.evaluate(() => {
+async function readFlights(
+  page: Page,
+  date: string,
+  toVnd: ToVnd,
+  rate: { currency: string; rate: number } | null,
+): Promise<Fare[]> {
+  const rows = await page.evaluate((currencies) => {
     const seen = new Set<Element>();
     const out: string[] = [];
     for (const el of document.querySelectorAll("span")) {
       if (!/^V[JZ]\d{3,4}$/.test(el.textContent?.trim() || "")) continue;
       let node: Element | null = el;
+      const money = new RegExp(`${currencies}|₫`);
       for (let i = 0; i < 8 && node; i++) {
         const t = (node as HTMLElement).innerText || "";
-        if (t.includes("Đến") && t.includes("VND")) break;
+        // Không khoá cứng "VND": trang trả tiền tệ theo IP, bản deploy ngoài Việt
+        // Nam thấy USD nên tìm theo "có đơn vị tiền nào đó" mới đúng.
+        if (t.includes("Đến") && money.test(t)) break;
         node = node.parentElement;
       }
       if (!node || seen.has(node)) continue;
@@ -268,20 +330,23 @@ async function readFlights(page: Page, date: string): Promise<Fare[]> {
       out.push((node as HTMLElement).innerText || "");
     }
     return out;
-  });
+  }, CURRENCIES);
 
   const fares: Fare[] = [];
   for (const text of rows) {
     const flightNo = text.match(/\bV[JZ]\d{3,4}\b/)?.[0] ?? null;
     const times = text.match(/(\d{1,2}:\d{2})\s*Đến\s*(\d{1,2}:\d{2})/);
-    const prices = pricesIn(text);
-    if (!prices.length) continue; // every cabin sold out
+    const best = lowestVnd(text, toVnd);
+    if (!best) continue; // every cabin sold out
     fares.push({
       date,
-      price: Math.min(...prices),
+      price: best.vnd,
       flightNo,
       depTime: times?.[1] ?? null,
       arrTime: times?.[2] ?? null,
+      ...(rate && best.money.currency !== "VND"
+        ? { converted: { amount: best.money.amount, currency: best.money.currency, rate: rate.rate } }
+        : {}),
     });
   }
   return fares;
@@ -561,6 +626,8 @@ export type LegResult = {
   fares: Fare[];
   datesSeen: number;
   cheapestSeen: number | null;
+  /** Có khi giá trên trang không phải VND: mọi số VND trong kết quả là số quy đổi. */
+  converted?: { currency: string; rate: number };
 };
 
 /**
@@ -680,13 +747,47 @@ export async function searchLeg(
     // Trang kết quả render dần: chờ tới lúc thật sự có giá trên dải ngày, thay vì
     // đặt cứng 15s — trang trả nhanh thì tiết kiệm được cả chục giây, mà trả chậm
     // cũng không hụt.
-    await page
-      .getByText(/000\s*VND/)
-      .first()
-      .waitFor({ state: "visible", timeout: 45_000 })
-      .catch(() => {});
-    await page.waitForTimeout(2000);
+    // Trang kết quả render dần. Chờ tới lúc **parser đọc được giá** trên dải ngày,
+    // chứ đừng chờ một mẫu text nào đó: nhãn "VND" ở header khớp ngay trong 2s và
+    // dẫn tới đọc dải ngày khi giá còn chưa về.
+    // Đọc **toàn bộ** chip, không phải mấy chip đầu: giá chỉ render quanh ngày đang
+    // chọn, nên với ngày xa (dải ngày dài cả trăm chip) thì phần đầu luôn rỗng.
+    const stripMoney = async () =>
+      moneyIn(
+        await page.evaluate(() =>
+          [...document.querySelectorAll(".slick-slide[data-index]")]
+            .map((el) => (el as HTMLElement).innerText || "")
+            .join(" "),
+        ),
+      );
+
+    let pageMoney = await stripMoney();
+    for (let waited = 0; !pageMoney.length && waited < 45; waited++) {
+      await page.waitForTimeout(1000);
+      pageMoney = await stripMoney();
+    }
     mark("trang kết quả");
+
+    // Tiền tệ do trang chọn theo IP, nên phải hỏi trang chứ đừng giả định. Lấy tỷ
+    // giá đúng một lần cho cả lượt: tỷ giá đổi giữa lượt thì hai ngày cạnh nhau
+    // lại tính bằng hai mức khác nhau, không so được với nhau nữa.
+    const foreign = pageMoney.find((m) => m.currency !== "VND");
+    const fx = foreign ? await rateToVnd(foreign.currency) : null;
+    if (fx && foreign) {
+      console.log(
+        `[vietjet] trang trả giá bằng ${foreign.currency}, quy đổi 1 ${foreign.currency} =` +
+          ` ${Math.round(fx.rate).toLocaleString("vi-VN")} ₫ (${fx.source})`,
+      );
+    }
+    const rate = foreign && fx ? { currency: foreign.currency, rate: fx.rate } : null;
+
+    // Quy về VND để so với ngưỡng của config. Tiền tệ nào không có tỷ giá thì trả
+    // null — bỏ qua còn hơn báo một con số sai.
+    const toVnd: ToVnd = (m) => {
+      if (m.currency === "VND") return m.amount;
+      if (rate && m.currency === rate.currency) return Math.round(m.amount * rate.rate);
+      return null;
+    };
 
     const today = await page.evaluate(() => {
       const d = new Date();
@@ -703,7 +804,7 @@ export async function searchLeg(
     for (let i = 0; i < wanted.length; i += 5) {
       if (outOfTime()) break;
       if (i > 0 && !(await selectStripDate(page, today, wanted[i]))) break;
-      for (const [d, p] of await readStrip(page, today)) {
+      for (const [d, p] of await readStrip(page, today, toVnd)) {
         if (!lowest.has(d) || p < lowest.get(d)!) lowest.set(d, p);
       }
     }
@@ -717,9 +818,14 @@ export async function searchLeg(
       detailed.add(date);
 
       if (!(await selectStripDate(page, today, date))) continue;
-      const rows = await readFlights(page, date);
+      const rows = await readFlights(page, date, toVnd, rate);
       if (rows.length) fares.push(...rows);
-      else fares.push({ date, price: strip, flightNo: null, depTime: null, arrTime: null });
+      else {
+        // Không đọc được bảng chuyến: giá trên dải ngày vẫn là thông tin thật, chỉ
+        // là không biết chuyến nào. Giá gốc thì tính lại từ số đã quy đổi.
+        const converted = rate ? { amount: strip / rate.rate, currency: rate.currency, rate: rate.rate } : undefined;
+        fares.push({ date, price: strip, flightNo: null, depTime: null, arrTime: null, ...(converted ? { converted } : {}) });
+      }
     }
 
     // Không đọc được giá nào là hỏng, không phải "hết vé": báo lỗi kèm đúng nội
@@ -755,9 +861,17 @@ export async function searchLeg(
         );
       }
 
+      // Dải ngày có chip nhưng không chip nào có giá là dấu hiệu Vietjet đang giữ
+      // giá với IP này — hay gặp khi quét quá dày. Nói ra để khỏi đi sửa selector
+      // trong khi chẳng có gì hỏng.
+      const withheld = (seen?.chips ?? 0) > 0;
       throw new Error(
-        `Không đọc được giá nào cho ${origin}→${dest} — ${JSON.stringify(seen)}` +
-          `\n[mạng] ${session.net()}\n[mốc] ${marks.join(" · ")}`,
+        `Không đọc được giá nào cho ${origin}→${dest}` +
+          (withheld
+            ? ` — dải ngày có ${seen?.chips} ngày nhưng không ngày nào kèm giá. Thường là Vietjet` +
+              ` tạm giữ giá với IP này vì quét quá dày; giãn chu kỳ quét rồi thử lại sau ít lâu.`
+            : ` — ${JSON.stringify(seen)}`) +
+          `\n[dải ngày] ${seen?.sample.join(" | ")}\n[mạng] ${session.net()}\n[mốc] ${marks.join(" · ")}`,
       );
     }
 
@@ -768,7 +882,7 @@ export async function searchLeg(
         `${cheapestSeen ? `, thấp nhất ${cheapestSeen.toLocaleString("vi-VN")}` : ""}`,
     );
 
-    return { fares, datesSeen: lowest.size, cheapestSeen };
+    return { fares, datesSeen: lowest.size, cheapestSeen, ...(rate ? { converted: rate } : {}) };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     mark("lỗi");

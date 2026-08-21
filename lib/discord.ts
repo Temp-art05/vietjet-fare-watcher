@@ -12,9 +12,21 @@ export type AlertPayload = {
   deeplink: string;
   /** "everyone" | "here" | ID vai trò | null */
   mention?: string | null;
+  /**
+   * Có khi trang trả tiền tệ khác VND (IP ngoài Việt Nam): `price` là số **quy
+   * đổi**, và noti phải nói ra để không ai tưởng đó là giá VND trên trang.
+   */
+  converted?: { amount: number; currency: string; rate: number } | null;
 };
 
-const vnd = (n: number) => `${n.toLocaleString("vi-VN")} ₫`;
+const vnd = (n: number) => `${Math.round(n).toLocaleString("vi-VN")} ₫`;
+
+/** Giá quy đổi phải hiện kèm dấu ≈: sai vài phần trăm là chuyện có thật. */
+const shown = (a: AlertPayload) => (a.converted ? `≈ ${vnd(a.price)}` : vnd(a.price));
+
+const original = (c: NonNullable<AlertPayload["converted"]>) =>
+  `${c.amount.toLocaleString("vi-VN", { maximumFractionDigits: 2 })} ${c.currency}` +
+  ` · 1 ${c.currency} = ${vnd(c.rate)}`;
 
 /**
  * Discord only pings when the mention sits in `content` (embeds never ping) AND
@@ -43,9 +55,12 @@ function embed(a: AlertPayload) {
       : `${a.origin} → ${a.dest}`;
 
   const fields: { name: string; value: string; inline: boolean }[] = [
-    { name: "Giá", value: vnd(a.price), inline: true },
+    { name: "Giá", value: shown(a), inline: true },
     { name: "Ngày đi", value: a.departDate, inline: true },
   ];
+  if (a.converted) {
+    fields.push({ name: "Giá gốc trên trang", value: original(a.converted), inline: false });
+  }
   if (a.returnDate) fields.push({ name: "Ngày về", value: a.returnDate, inline: true });
   if (a.flightNo) {
     const time = a.depTime && a.arrTime ? ` · ${a.depTime}–${a.arrTime}` : "";
@@ -60,12 +75,16 @@ function embed(a: AlertPayload) {
     allowed_mentions: ping.allowed_mentions,
     embeds: [
       {
-        title: `✈️ ${route} — ${vnd(a.price)}`,
+        title: `✈️ ${route} — ${shown(a)}`,
         description: `Config **${a.configName}** vừa bắt được vé trong ngưỡng giá.`,
         url: a.deeplink,
         color: 0xed1c24,
         fields,
-        footer: { text: "Giá có thể đổi bất cứ lúc nào — đặt sớm nếu ưng." },
+        footer: {
+          text: a.converted
+            ? `Giá quy đổi từ ${a.converted.currency}, có thể lệch vài phần trăm — bấm vào tiêu đề để xem giá thật. Giá đổi bất cứ lúc nào.`
+            : "Giá có thể đổi bất cứ lúc nào — đặt sớm nếu ưng.",
+        },
         timestamp: new Date().toISOString(),
       },
     ],

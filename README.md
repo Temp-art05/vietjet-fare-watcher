@@ -58,7 +58,13 @@ Web ở `http://<host>:3000`. File JSON nằm trên volume `watcher-data` nên c
 
 > **Region:** `vercel.json` ghim function ở `sin1` (Singapore) — gần Việt Nam nhất trong các region Vercel có. Không ghim thì deployment có thể rơi vào `iad1` (Mỹ), mỗi request vượt Thái Bình Dương và lượt quét hay chạm hạn 300s. **Vercel không có region Việt Nam**, nên ghim region không đổi được tiền tệ, chỉ đổi được độ trễ.
 
-> **Giới hạn không sửa được bằng code:** Vietjet chọn tiền tệ **theo IP ở phía server** (trang không có nút đổi tiền tệ — dropdown ở header chỉ đổi ngôn ngữ). Function của Vercel nằm ngoài Việt Nam nên trang trả giá bằng **USD**, trong khi ngưỡng giá của config là VND ⇒ không so được, và tool sẽ báo đúng chuyện đó chứ không im lặng. Muốn chạy trên Vercel thì phải đặt `VJ_PROXY=http://user:pass@host:port` trỏ vào một proxy Việt Nam. Không có proxy thì dùng bản Docker/VPS đặt ở Việt Nam — đó là cách chạy được ngay.
+> **Tiền tệ theo IP.** Vietjet chọn tiền tệ **ở phía server theo IP** (trang không có nút đổi tiền tệ — dropdown ở header chỉ đổi ngôn ngữ). Function Vercel nằm ngoài Việt Nam nên trang trả giá bằng **USD**, trong khi ngưỡng của config là VND. Ba cách xử lý, theo thứ tự chính xác giảm dần:
+>
+> 1. **Chạy từ IP Việt Nam** — bản Docker/VPS đặt ở VN, hoặc chạy trên máy mình. Giá là VND thật, không xấp xỉ.
+> 2. **`VJ_PROXY=http://user:pass@host:port`** trỏ vào proxy Việt Nam (ký tự đặc biệt trong user/pass phải URL-encode). Cũng cho giá VND thật.
+> 3. **Để tool tự quy đổi** — mặc định khi không có hai cái trên. Trang trả USD thì tool lấy tỷ giá từ [open.er-api.com](https://open.er-api.com) (miễn phí, không cần key, cache 6h trong process), quy sang VND rồi mới so ngưỡng. Noti ghi rõ `≈`, giá gốc và tỷ giá đã dùng. Đặt `VJ_USD_VND` để tự ấn định tỷ giá thay vì gọi API.
+>
+> Quy đổi thì **giá là xấp xỉ**: lệch vài phần trăm là bình thường, nên vé sát ngưỡng có thể lọt hoặc bị bỏ (ngưỡng 500.000 ₫ ≈ 19,2 USD). Cần chính xác tuyệt đối thì dùng cách 1 hoặc 2.
 
 Phần còn lại chạy được cả bộ, kể cả scrape. Ba thứ đã được chuẩn bị sẵn trong repo:
 
@@ -80,6 +86,8 @@ Một chỗ dễ sụp: đừng đọc bằng `get(..., { useCache: false })`. C
 - Binary Chromium là mấy file `.br` chỉ mở lúc chạy, bộ dò phụ thuộc của Next không thấy, nên `outputFileTracingIncludes` trong `next.config.mjs` khai tay cho từng route có quét. Bundle ra khoảng **75 MB**, thoải mái dưới hạn 250 MB
 
 **3. Lịch quét.** `worker.ts` không sống trên serverless (process đóng ngay sau mỗi request), nên `instrumentation.ts` tự bỏ qua khi thấy biến `VERCEL`. Thay vào đó `vercel.json` khai Cron gọi `/api/cron`, làm đúng việc bộ poll vẫn làm. Đặt `CRON_SECRET` trong Project Settings để chặn request lạ.
+
+> **Quét dày là bị giữ giá.** Quét liên tục từ một IP thì Vietjet trả dải ngày **có ngày mà không có giá** — không phải lỗi selector, và tool sẽ nói đúng chuyện đó trong dòng lỗi. Giãn chu kỳ ra rồi chờ ít lâu là hết.
 
 Lịch mặc định để **`0 3 * * *`** (3h sáng mỗi ngày) vì đó là mức dày nhất mà **Hobby** cho phép — để dày hơn thì Vercel **từ chối deploy** luôn. Một ngày một lượt thì tool gần như vô dụng, nên chọn một trong hai cách:
 

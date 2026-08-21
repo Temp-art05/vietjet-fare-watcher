@@ -13,6 +13,8 @@ export type RunResult = {
   /** Giá thấp nhất nhìn thấy, kể cả khi nó trên ngưỡng — để phân biệt "không có
    * vé rẻ" với "không đọc được gì". */
   cheapestSeen: number | null;
+  /** Tiền tệ trang đang trả, khi nó không phải VND: mọi số VND là số quy đổi. */
+  converted?: { currency: string; rate: number };
   error?: string;
 };
 
@@ -36,6 +38,18 @@ function cheapestOverall(fares: Fare[]): Fare | null {
 }
 
 type Candidate = { fingerprint: string; payload: AlertPayload; fare: Fare; returnFare?: Fare };
+
+/**
+ * Khứ hồi báo theo tổng hai chiều, nên giá gốc cũng phải là tổng — và chỉ cộng
+ * được khi hai chiều cùng tiền tệ, cùng tỷ giá.
+ */
+function totalConverted(out: Fare, ret: Fare): AlertPayload["converted"] {
+  const a = out.converted;
+  const b = ret.converted;
+  if (!a || !b) return a ?? b ?? null;
+  if (a.currency !== b.currency || a.rate !== b.rate) return null;
+  return { amount: a.amount + b.amount, currency: a.currency, rate: a.rate };
+}
 
 function buildCandidates(config: WatchConfig, out: Fare[], ret: Fare[]): Candidate[] {
   const inRange = (p: number) => p >= config.minPrice && p <= config.maxPrice;
@@ -67,6 +81,7 @@ function buildCandidates(config: WatchConfig, out: Fare[], ret: Fare[]): Candida
           arrTime: bestOut.arrTime,
           deeplink: bookingUrl(config.origin, config.dest, bestOut.date),
           mention: config.mention,
+          converted: totalConverted(bestOut, bestRet),
         },
       },
     ];
@@ -95,6 +110,7 @@ function buildCandidates(config: WatchConfig, out: Fare[], ret: Fare[]): Candida
           arrTime: fare.arrTime,
           deeplink: bookingUrl(config.origin, config.dest, date),
           mention: config.mention,
+          converted: fare.converted ?? null,
         },
       });
     }
@@ -139,6 +155,8 @@ export async function runConfig(config: WatchConfig, deadline?: number): Promise
     result.datesSeen = outbound.datesSeen + inbound.datesSeen;
     const seen = [outbound.cheapestSeen, inbound.cheapestSeen].filter((p): p is number => p !== null);
     result.cheapestSeen = seen.length ? Math.min(...seen) : null;
+    const fx = outbound.converted ?? inbound.converted;
+    if (fx) result.converted = fx;
 
     const candidates = buildCandidates(config, outbound.fares, inbound.fares);
     result.matched = candidates.length;

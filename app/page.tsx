@@ -315,7 +315,10 @@ export default function Home() {
         setError(
           `${c.name}: quét ${r.scanned} vé, không có vé nào vào ngưỡng giá.` +
             (r.datesSeen
-              ? ` Đọc được giá của ${r.datesSeen} ngày, thấp nhất ${vnd(r.cheapestSeen)}.`
+              ? ` Đọc được giá của ${r.datesSeen} ngày, thấp nhất ${vnd(r.cheapestSeen)}` +
+                (r.converted
+                  ? ` (quy đổi từ ${r.converted.currency}, 1 ${r.converted.currency} = ${vnd(Math.round(r.converted.rate))}).`
+                  : ".")
               : " Không đọc được giá của ngày nào — có thể trang đổi giao diện."),
         );
       else setError(`${c.name}: quét ${r.scanned} vé, khớp ${r.matched}, bắn ${r.notified} noti.`);
