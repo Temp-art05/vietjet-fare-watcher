@@ -217,6 +217,26 @@ async function tagPlaceInputs(page: Page) {
   });
 }
 
+/**
+ * Radio "một chiều" của widget hero. Cùng lý do như `tagPlaceInputs`: widget xuất
+ * hiện hai lần, và `.first()` có thể trúng bản trong thanh dính dưới — bản đó không
+ * đổi trạng thái nên đọc `checked` ở đấy thì lúc nào cũng thấy chưa chọn.
+ */
+async function tagOneWay(page: Page) {
+  return page.evaluate(() => {
+    window.scrollTo(0, 0);
+    const radios = [...document.querySelectorAll('input[value="oneway"]')];
+    if (!radios.length) return null;
+    // Radio của MUI trong suốt nhưng vẫn có kích thước; lấy bản nằm cao nhất.
+    const hero = radios.reduce((best, el) =>
+      el.getBoundingClientRect().top < best.getBoundingClientRect().top ? el : best,
+    );
+    for (const el of document.querySelectorAll("[data-vj-oneway]")) el.removeAttribute("data-vj-oneway");
+    hero.setAttribute("data-vj-oneway", "1");
+    return (hero as HTMLInputElement).checked;
+  });
+}
+
 async function fillPlace(page: Page, which: "origin" | "dest", iata: string) {
   const input = page.locator(`input[data-vj="${which}"]`).first();
   const airportRow = page.getByText(new RegExp(`^\\s*${iata}\\s*$`)).first();
@@ -728,19 +748,26 @@ export async function searchLeg(
 
     mark("trang chủ");
 
-    // Element xuất hiện KHÁC với trang đã hydrate. Bấm radio "một chiều" cho tới
-    // khi nó thật sự được chọn: đó là bằng chứng React đã gắn handler và trang nhận
-    // tương tác. Không có mốc này thì mấy bước sau gõ vào ô nhập rồi mất sạch, và
-    // lỗi hiện ra chỉ là "ô đang rỗng".
-    for (let attempt = 0; attempt < 6; attempt++) {
-      await oneway.click({ force: true }).catch(() => {});
-      if (await oneway.isChecked().catch(() => false)) break;
-      await page.waitForTimeout(1500);
-      if (attempt === 5) {
-        throw new Error(`Trang chủ không nhận tương tác (radio một chiều không chọn được) — ${await pageSnapshot(page)}`);
+    // Element xuất hiện KHÁC với trang đã hydrate xong. Bấm radio "một chiều" tới
+    // khi nó báo đã chọn: đó là bằng chứng React đã gắn handler, và chờ ở đây thì
+    // mấy bước sau không gõ vào một ô chưa sống.
+    //
+    // Nhưng đây chỉ là *tín hiệu*, không phải điều kiện: trang có thể đã nhận tương
+    // tác mà `checked` vẫn không phản ánh (mình đọc nhầm bản radio, hay MUI giữ state
+    // ở chỗ khác). Hết lượt chờ thì đi tiếp — chỗ kiểm thật là `fillPlace`, nó tự
+    // xác nhận giá trị đã vào ô.
+    let interactive = false;
+    for (let attempt = 0; attempt < 5 && !interactive; attempt++) {
+      const checked = await tagOneWay(page);
+      if (checked) {
+        interactive = true;
+        break;
       }
+      await page.locator('input[data-vj-oneway="1"]').first().click({ force: true, timeout: 8000 }).catch(() => {});
+      await page.waitForTimeout(1200);
+      interactive = (await tagOneWay(page)) === true;
     }
-    mark("hydrate");
+    mark(interactive ? "hydrate" : "hydrate?");
     await page.waitForTimeout(500);
 
     await fillPlace(page, "origin", origin);
