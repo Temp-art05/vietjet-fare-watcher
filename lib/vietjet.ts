@@ -81,9 +81,10 @@ const CURRENCIES = "VND|USD|EUR|AUD|SGD|KRW|JPY|TWD|THB|CNY|HKD|MYR|INR|CAD|GBP"
 
 /**
  * "1.790.000 VND", "1,790,000 VND", "VND 1.790.000", "1.790.000 ₫", "34 USD",
- * và cả "27 .55 USD" — trang tách phần xu ra element riêng nên `innerText` chèn
- * khoảng trắng vào giữa. Dấu phân cách khác nhau theo tiền tệ nên chuẩn hoá riêng:
- * VND không có phần thập phân, USD/EUR… thì có.
+ * "27 .55 USD" và "1.790 000 VND" — trang tách phần xu *và* nhóm nghìn cuối ra
+ * element riêng, nên `innerText` chèn khoảng trắng vào giữa con số. Dấu phân cách
+ * khác nhau theo tiền tệ nên chuẩn hoá riêng: VND không có phần thập phân,
+ * USD/EUR… thì có.
  */
 export function moneyIn(text: string): Money[] {
   const out: Money[] = [];
@@ -99,10 +100,16 @@ export function moneyIn(text: string): Money[] {
     out.push({ amount, currency: code === "₫" ? "VND" : code });
   };
 
-  // Chỉ cho đúng một khoảng trắng, và chỉ khi ngay sau nó là phần thập phân —
-  // "27 .55 USD" là thật (trang tách phần xu), còn nếu cho khoảng trắng tự do thì
-  // "17:35 690.000 VND" bị đọc thành 35.690.000.
-  for (const m of text.matchAll(new RegExp(`(\\d[\\d.,]*(?:\\s\\.\\d{1,2})?)\\s*(${CURRENCIES}|₫)`, "gi"))) {
+  // Khoảng trắng trong con số là thật, nhưng chỉ ở hai dạng: nhóm nghìn (`\s\d{3}`,
+  // như "690 000 VND" — trang tách 3 số cuối ra element riêng) và phần thập phân
+  // (`\s.\d{1,2}`, như "27 .55 USD"). Cho khoảng trắng tự do thì "17:35 690.000 VND"
+  // bị đọc thành 35.690.000.
+  //
+  // Chặn đằng trước bằng lookbehind: nếu không, "17:35 690 000 VND" khớp từ "35" rồi
+  // ngốn cả hai nhóm nghìn thành 35.690.000. Sau dấu `:` là giờ bay, không phải tiền.
+  for (const m of text.matchAll(
+    new RegExp(`(?<![:\\d])(\\d[\\d.,]*(?:\\s\\d{3})*(?:\\s?\\.\\d{1,2})?)\\s*(${CURRENCIES}|₫)`, "gi"),
+  )) {
     add(m[1], m[2]);
   }
   if (out.length) return out;
@@ -137,9 +144,61 @@ function lowestVnd(text: string, toVnd: ToVnd): { vnd: number; money: Money } | 
   return best;
 }
 
+/**
+ * Bong bóng chat của Vietjet bung ra sau vài giây rồi phủ lên đúng widget tìm chuyến.
+ * Playwright nói thẳng chuyện đó: `#cw_hello_message` trong `#aip-chat-box`
+ * "intercepts pointer events". Container serverless chậm nên trang nằm chờ lâu hơn
+ * máy local — bong bóng kịp bung, click vào ô điểm đi rơi vào nó, MUI thấy không
+ * chọn gì thì xoá ô, và lỗi hiện ra chỉ là "ô đang là rỗng".
+ *
+ * Chat là widget bên thứ ba, không có nút đóng nào chắc chắn: ẩn thẳng bằng DOM.
+ * Chỉ là DOM nên rẻ (vài ms) — gọi lại được trước mỗi lần chạm vào widget, khác với
+ * `dismissOverlays` phải chờ click nên đắt.
+ */
+const CHAT_SELECTORS = ["#aip-chat-box", "#cw_hello_message", ".cw_hello_message", "#chat-widget-container"];
+
+async function hideChat(page: Page) {
+  await page
+    .evaluate((sels) => {
+      for (const sel of sels) {
+        for (const el of document.querySelectorAll(sel)) {
+          (el as HTMLElement).style.setProperty("display", "none", "important");
+        }
+      }
+    }, CHAT_SELECTORS)
+    .catch(() => {});
+}
+
 async function dismissOverlays(page: Page) {
   await page.getByText("Để sau", { exact: true }).first().click({ timeout: 4000 }).catch(() => {});
   await page.getByRole("button", { name: "Từ chối tất cả" }).first().click({ timeout: 4000 }).catch(() => {});
+  await hideChat(page);
+}
+
+/**
+ * Cái gì đang nằm trên ô nhập: `elementFromPoint` ngay tâm ô. Nhìn từ dòng lỗi thì
+ * popup, banner cookie hay bong bóng chat đè lên đều ra cùng một câu "ô đang là rỗng",
+ * nên phải nói ra thứ đang đè — không thì lần sau lại ngồi đoán.
+ */
+async function whatCovers(page: Page, which: "origin" | "dest") {
+  return page
+    .evaluate((w) => {
+      const input = document.querySelector(`input[data-vj="${w}"]`) as HTMLElement | null;
+      if (!input) return "không còn ô nhập trên trang";
+      const r = input.getBoundingClientRect();
+      if (!r.width || !r.height) return "ô nhập không có kích thước (đang bị ẩn)";
+      const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+      if (!top) return "ô nhập nằm ngoài vùng nhìn";
+      if (top === input || input.contains(top) || top.contains(input)) return "không có gì đè lên ô";
+      const desc = (el: Element) => {
+        const cls = typeof el.className === "string" && el.className.trim()
+          ? `.${el.className.trim().split(/\s+/).slice(0, 2).join(".")}`
+          : "";
+        return `${el.tagName.toLowerCase()}${el.id ? `#${el.id}` : ""}${cls}`;
+      };
+      return `bị đè bởi ${desc(top)}${top.parentElement ? ` trong ${desc(top.parentElement)}` : ""}`;
+    }, which)
+    .catch(() => "không đọc được element đang đè");
 }
 
 /** Walks the react-date-range calendar to the wanted month, then clicks the day. */
@@ -251,6 +310,10 @@ async function fillPlace(page: Page, which: "origin" | "dest", iata: string) {
       throw new Error(`Không thấy ô nhập ${field} trên trang — ${await pageSnapshot(page)}`);
     }
 
+    // Bong bóng chat bung ra bất cứ lúc nào, kể cả sau khi đã ẩn một lần ở bước
+    // trước. Ẩn lại ngay trước khi click: rẻ, và đây đúng là chỗ nó phá.
+    await hideChat(page);
+
     // Trang hay có panel mở ra đè lên ô nhập; lúc đó click thường không tới được
     // element, phải bắn thẳng vào toạ độ của nó.
     await input.click({ timeout: 8000 }).catch(() => input.click({ force: true, timeout: 8000 }));
@@ -298,7 +361,7 @@ async function fillPlace(page: Page, which: "origin" | "dest", iata: string) {
   }
 
   const value = await input.inputValue().catch(() => "");
-  throw new Error(`Không chọn được ${field} ${iata} — ô đang là "${value}"`);
+  throw new Error(`Không chọn được ${field} ${iata} — ô đang là "${value}" · ${await whatCovers(page, which)}`);
 }
 
 /** Reads every date chip in the slick carousel that currently has a price. */
@@ -818,6 +881,7 @@ export async function searchLeg(
     // date pick; the sticky bottom bar carries the same controls unobstructed.
     await page.getByRole("button", { name: "Tìm chuyến bay" }).last().click({ timeout: 20_000 });
     await page.waitForURL(/select-flight/, { timeout: 60_000 });
+    if (process.env.VJ_TRACE) console.log(`[vietjet] url trang kết quả: ${page.url()}`);
 
     // Trang kết quả render dần: chờ tới lúc thật sự có giá trên dải ngày, thay vì
     // đặt cứng 15s — trang trả nhanh thì tiết kiệm được cả chục giây, mà trả chậm
@@ -912,13 +976,25 @@ export async function searchLeg(
       const seen = await page
         .evaluate(() => {
           const nodes = [...document.querySelectorAll(".slick-slide[data-index]")];
+          const texts = nodes.map((el) => ((el as HTMLElement).innerText || "").replace(/\s+/g, " ").trim());
+          const nonEmpty = texts.filter(Boolean);
+          // Chip nào cũng có chữ số (số ngày), nên chữ số không nói được gì. Tín hiệu
+          // thật là **ký hiệu tiền tệ**: có nó mà parser vẫn không ra số ⇒ định dạng giá
+          // đã đổi; không có nó ⇒ giá thật sự chưa về. Hai chuyện đó sửa khác nhau.
+          const withMoney = nonEmpty.filter((t) => /(VND|₫|USD|EUR|AUD|SGD|KRW|JPY|TWD|THB|CNY|HKD|MYR|INR|CAD|GBP)/i.test(t));
           return {
             chips: nodes.length,
-            sample: nodes
-              .slice(0, 3)
+            chipsWithText: nonEmpty.length,
+            chipsWithMoney: withMoney.length,
+            // 3 chip đầu luôn là hôm nay và mai — chưa bao giờ nói được gì. Lấy
+            // nhiều hơn, và tách riêng chip có ký hiệu tiền — đó là chỗ giá phải nằm.
+            sample: nonEmpty.slice(0, 10),
+            moneySample: withMoney.slice(0, 6),
+            selected: nodes
+              .filter((el) => /active|selected/i.test(el.className))
               .map((el) => ((el as HTMLElement).innerText || "").replace(/\s+/g, " ").trim()),
             url: location.href,
-            body: (document.body?.innerText || "").replace(/\s+/g, " ").slice(0, 300),
+            body: (document.body?.innerText || "").replace(/\s+/g, " ").slice(0, 600),
           };
         })
         .catch(() => null);
@@ -940,13 +1016,25 @@ export async function searchLeg(
       // giá với IP này — hay gặp khi quét quá dày. Nói ra để khỏi đi sửa selector
       // trong khi chẳng có gì hỏng.
       const withheld = (seen?.chips ?? 0) > 0;
+      // Có chip kèm số mà không quy ra được giá nào ⇒ đừng đổ cho Vietjet giữ giá,
+      // đây là parser đọc trượt định dạng mới. Nói đúng cái đang xảy ra.
+      const looksLikeParser = (seen?.chipsWithMoney ?? 0) > 0;
       throw new Error(
         `Không đọc được giá nào cho ${origin}→${dest}` +
-          (withheld
-            ? ` — dải ngày có ${seen?.chips} ngày nhưng không ngày nào kèm giá. Thường là Vietjet` +
-              ` tạm giữ giá với IP này vì quét quá dày; giãn chu kỳ quét rồi thử lại sau ít lâu.`
-            : ` — ${JSON.stringify(seen)}`) +
-          `\n[dải ngày] ${seen?.sample.join(" | ")}\n[mạng] ${session.net()}\n[mốc] ${marks.join(" · ")}`,
+          (looksLikeParser
+            ? ` — dải ngày có ${seen?.chips} ngày, ${seen?.chipsWithMoney} ngày có ký hiệu tiền` +
+              ` tệ trên chip mà không đọc ra được số tiền nào. Định dạng giá của trang đã đổi:` +
+              ` xem [chip có giá] rồi đối chiếu \`moneyIn()\`.`
+            : withheld
+              ? ` — dải ngày có ${seen?.chips} ngày (${seen?.chipsWithText} ngày có chữ) nhưng không` +
+                ` ngày nào kèm giá. Thường là Vietjet tạm giữ giá với IP này vì quét quá dày;` +
+                ` giãn chu kỳ quét rồi thử lại sau ít lâu.`
+              : ` — không có chip ngày nào trên trang.`) +
+          `\n[dải ngày] ${seen?.sample.join(" | ")}` +
+          `\n[chip có giá] ${seen?.moneySample.length ? seen.moneySample.join(" | ") : "không có"}` +
+          `\n[chip đang chọn] ${seen?.selected.length ? seen.selected.join(" | ") : "không xác định"}` +
+          `\n[url] ${seen?.url}\n[trang] ${seen?.body}` +
+          `\n[mạng] ${session.net()}\n[mốc] ${marks.join(" · ")}`,
       );
     }
 
@@ -962,18 +1050,32 @@ export async function searchLeg(
     const msg = err instanceof Error ? err.message : String(err);
     mark("lỗi");
     const timing = `\n[mốc] ${marks.join(" · ")}`;
+    // Browser đã chết thì hỏi trang là vô nghĩa; chẩn đoán tài nguyên nói được nhiều hơn.
     if (looksLikeCrash(err)) throw new Error(`${msg}\n[chẩn đoán] ${await crashNotes()}${timing}`);
-    if (/timeout/i.test(msg)) {
-      const snap = await pageSnapshot(page);
-      if (snap) throw new Error(`${msg}\n[trang lúc lỗi] ${snap}${timing}`);
-    }
-    throw new Error(`${msg}${timing}`);
+
+    // Đính trang lúc lỗi + tầng mạng cho **mọi** lỗi, không riêng timeout: lỗi
+    // "không chọn được điểm đi" trước đây chỉ có đúng một dòng trống trơn, đọc trên
+    // web không biết trang đang là gì, cũng không biết API gợi ý có bị WAF chặn hay
+    // không — phải chạy lại ở local mới đoán ra, mà local thì không tái hiện.
+    // Bỏ qua khi message đã tự kèm rồi, để khỏi in hai lần.
+    const snap = /url https?:/.test(msg) ? null : await pageSnapshot(page);
+    const net = msg.includes("[mạng]") ? "" : `\n[mạng] ${session.net()}`;
+    throw new Error(`${msg}${snap ? `\n[trang lúc lỗi] ${snap}` : ""}${net}${timing}`);
   } finally {
     await session.close();
   }
 }
 
-export function bookingUrl(origin: string, dest: string, date: string) {
-  const [y, m, d] = date.split("-");
-  return `https://www.vietjetair.com/vi/select-flight?from=${origin}&to=${dest}&date=${d}/${m}/${y}`;
+/**
+ * Vietjet **không có deeplink**. Trang kết quả là `/vi/select-flight` trần: chặng và
+ * ngày nằm trong client state, không nằm trên URL (đo trực tiếp: `page.url()` sau khi
+ * bấm "Tìm chuyến bay" không có một tham số nào). Mọi dạng `?from=&to=&date=` — kể cả
+ * `?tripType=`, bản `/en/`, và dạng hash — đều bị 302 về trang chủ.
+ *
+ * Nên link trong thông báo chỉ trỏ được về trang chủ; chặng/ngày/giá đã nằm sẵn trong
+ * các field của embed để người bấm điền lại. Trả URL trang kết quả giả như trước thì
+ * người bấm rơi vào trang chủ trống mà không hiểu vì sao.
+ */
+export function bookingUrl() {
+  return "https://www.vietjetair.com/vi/";
 }

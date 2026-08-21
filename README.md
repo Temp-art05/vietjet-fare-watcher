@@ -141,6 +141,32 @@ Còn giá vé thì khác. Vietjet **mã hoá toàn bộ request body** của API
 3. Quét cả dải ngày bằng cách nhảy từng chặng 5 ngày, chỉ ngày nào có giá dưới ngưỡng mới mở chi tiết chuyến bay
 4. Vé khớp ngưỡng → bắn Discord → ghi lại `fingerprint` để lần sau không bắn trùng
 
+### Mấy cái bẫy của trang Vietjet
+
+Ba thứ đã từng làm cả lượt quét thành rác, đều đã có code chặn và có chẩn đoán in ra khi tái diễn:
+
+**1. Giá bị tách nhóm nghìn.** Chip dải ngày render 3 số cuối ở element riêng, nên `innerText` ra
+`Từ 690 000 VND` / `1.790 000 VND` (khoảng trắng giữa con số). Regex cũ khớp trượt thành `000`, bị
+ngưỡng "< 10.000 ₫" loại, và cả lượt quét báo *"không đọc được giá nào"* trong khi trang đang hiện
+giá. `moneyIn()` nay nhận nhóm nghìn cách nhau bằng khoảng trắng, và có lookbehind `(?<![:\d])` để
+giờ bay `17:35` không bị ngốn thành `35.690.000`. Ca thật nằm trong `scripts/money-test.ts` —
+script này giờ so khớp chính xác và `exit` khác 0 khi sai, trước đây nó chỉ in rồi luôn báo xanh.
+
+**2. Bong bóng chat đè lên widget.** `#cw_hello_message` trong `#aip-chat-box` bung ra sau vài giây
+và phủ đúng ô điểm đi. Container serverless chậm nên trang nằm chờ lâu hơn máy local ⇒ bong bóng kịp
+bung ⇒ click rơi vào nó ⇒ MUI thấy không chọn gì thì xoá ô, và lỗi hiện ra chỉ là *"Không chọn được
+điểm đi DLI — ô đang là rỗng"*. `hideChat()` ẩn nó bằng DOM và được gọi lại trước **mỗi** lượt
+`fillPlace`, vì nó bung lại được. Lỗi chọn sân bay nay kèm luôn `elementFromPoint` ở tâm ô nhập, nên
+đọc dòng lỗi là biết thứ gì đang đè.
+
+**3. Không có deeplink.** Trang kết quả là `/vi/select-flight` **trần** — chặng, ngày, số khách nằm
+trong client state chứ không trên URL. Mọi dạng `?from=&to=&date=`, `?tripType=`, bản `/en/`, và cả
+dạng hash đều bị 302 về trang chủ (đã kiểm từng dạng). Nên `bookingUrl()` chỉ trả về trang chủ;
+chặng/ngày/giá đã nằm trong các field của embed Discord để người bấm điền lại.
+
+Mọi lỗi của một lượt quét nay đều kèm `[trang lúc lỗi]`, `[mạng]` (đếm xhr/fetch theo mã + URL đáng
+ngờ như AWS WAF/reCAPTCHA) và `[mốc]` từng bước — không chỉ riêng lỗi timeout như trước.
+
 ### Chống bị nâng giá
 
 Vietjet cá nhân hoá giá theo dấu vết người truy cập, nên mỗi lượt search đều là một phiên ẩn danh sạch:
