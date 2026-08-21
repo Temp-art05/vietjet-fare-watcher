@@ -315,6 +315,21 @@ const isServerless = () => Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_
  *
  *   VJ_PROXY=http://user:pass@host:port
  */
+/**
+ * Mô tả proxy đang dùng, **không kèm credential** — để `/api/health` xác nhận được
+ * biến môi trường đã vào bản deploy hay chưa. Đặt env rồi quên Redeploy là lỗi rất
+ * dễ mắc trên Vercel, mà nhìn từ ngoài thì y như proxy không hoạt động.
+ */
+export function proxyStatus() {
+  try {
+    const proxy = proxyOption();
+    if (!proxy) return { proxy: null as string | null };
+    return { proxy: proxy.server, proxyAuth: Boolean(proxy.username) };
+  } catch (err) {
+    return { proxy: "sai định dạng", proxyError: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 function proxyOption() {
   const raw = process.env.VJ_PROXY;
   if (!raw) return undefined;

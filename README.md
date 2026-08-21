@@ -56,6 +56,8 @@ Web ở `http://<host>:3000`. File JSON nằm trên volume `watcher-data` nên c
 
 ### Vercel
 
+> **Region:** `vercel.json` ghim function ở `sin1` (Singapore) — gần Việt Nam nhất trong các region Vercel có. Không ghim thì deployment có thể rơi vào `iad1` (Mỹ), mỗi request vượt Thái Bình Dương và lượt quét hay chạm hạn 300s. **Vercel không có region Việt Nam**, nên ghim region không đổi được tiền tệ, chỉ đổi được độ trễ.
+
 > **Giới hạn không sửa được bằng code:** Vietjet chọn tiền tệ **theo IP ở phía server** (trang không có nút đổi tiền tệ — dropdown ở header chỉ đổi ngôn ngữ). Function của Vercel nằm ngoài Việt Nam nên trang trả giá bằng **USD**, trong khi ngưỡng giá của config là VND ⇒ không so được, và tool sẽ báo đúng chuyện đó chứ không im lặng. Muốn chạy trên Vercel thì phải đặt `VJ_PROXY=http://user:pass@host:port` trỏ vào một proxy Việt Nam. Không có proxy thì dùng bản Docker/VPS đặt ở Việt Nam — đó là cách chạy được ngay.
 
 Phần còn lại chạy được cả bộ, kể cả scrape. Ba thứ đã được chuẩn bị sẵn trong repo:
